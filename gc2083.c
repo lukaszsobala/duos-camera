@@ -65,9 +65,14 @@
 #define GC2083_GAIN_LATCH_HOLD		0x2e
 #define GC2083_GAIN_LATCH_RELEASE	0x28
 
-/* Digital fine gain, Q6 (0x40 = 1.00x): integer part, then 6-bit fraction. */
+/*
+ * Digital fine gain, Q6 (0x40 = 1.00x). The integer part goes to 0x00b1 and the
+ * six fraction bits to 0x00b2, left-aligned into bits 7:2 - the fraction
+ * register is not a bare Q6 remainder. See gc2083_set_gain().
+ */
 #define GC2083_REG_DGAIN_INT		CCI_REG8(0x00b1)
 #define GC2083_REG_DGAIN_FRAC		CCI_REG8(0x00b2)
+#define GC2083_DGAIN_FRAC_SHIFT		2
 
 /*
  * Mirror and flip. Written to two registers, both of which the vendor updates
@@ -512,10 +517,15 @@ static int gc2083_set_gain(struct gc2083 *gc2083, u32 gain)
 
 	dgain = gain * GC2083_DGAIN_UNITY / gc2083_again_table[idx].gain;
 
+	/*
+	 * The fraction is left-aligned in its register, exactly as the vendor's
+	 * cmos_gains_update() writes it: (dgain & 0x3f) << 2.
+	 */
 	cci_write(gc2083->regmap, GC2083_REG_DGAIN_INT,
-		  dgain >> 6, &ret);
+		  dgain / GC2083_DGAIN_UNITY, &ret);
 	cci_write(gc2083->regmap, GC2083_REG_DGAIN_FRAC,
-		  (dgain & GENMASK(5, 0)) << 2, &ret);
+		  (dgain % GC2083_DGAIN_UNITY) << GC2083_DGAIN_FRAC_SHIFT,
+		  &ret);
 
 	return ret;
 }
@@ -544,6 +554,10 @@ static int gc2083_set_ctrl(struct v4l2_ctrl *ctrl)
 	s64 exposure_max;
 	int ret = 0;
 
+	/*
+	 * The handler lock is the subdev state lock (see gc2083_probe()), so the
+	 * active state is held for us here and can be read and updated directly.
+	 */
 	state = v4l2_subdev_get_locked_active_state(&gc2083->sd);
 	format = v4l2_subdev_state_get_format(state, 0);
 
@@ -552,37 +566,48 @@ static int gc2083_set_ctrl(struct v4l2_ctrl *ctrl)
 		/* Exposure has to stay inside the new frame length. */
 		exposure_max = format->height + ctrl->val -
 			       GC2083_EXPOSURE_MARGIN;
-		__v4l2_ctrl_modify_range(gc2083->exposure,
-					 gc2083->exposure->minimum,
-					 exposure_max,
-					 gc2083->exposure->step,
-					 min(gc2083->exposure->val,
-					     exposure_max));
+		ret = __v4l2_ctrl_modify_range(gc2083->exposure,
+					       gc2083->exposure->minimum,
+					       exposure_max,
+					       gc2083->exposure->step,
+					       min(gc2083->exposure->val,
+						   exposure_max));
+		if (ret)
+			return ret;
 		break;
 	case V4L2_CID_HFLIP:
 	case V4L2_CID_VFLIP:
-		/* Both flips move the Bayer phase, so the media code changes. */
+		/*
+		 * Both flips move the Bayer phase, so the media code changes.
+		 * The flips are V4L2_CTRL_FLAG_MODIFY_LAYOUT and so cannot move
+		 * while streaming; updating the active format here keeps
+		 * get_fmt() in step with them without a set_fmt() round trip.
+		 */
 		format->code = gc2083_get_mbus_code(gc2083);
 		break;
 	default:
 		break;
 	}
 
-	/* Only touch the sensor when it is powered up for streaming. */
+	/*
+	 * Only touch the sensor when it is powered up. Anything set while it is
+	 * suspended is applied by the __v4l2_ctrl_handler_setup() in
+	 * gc2083_start_streaming().
+	 */
 	if (!pm_runtime_get_if_active(gc2083->dev))
 		return 0;
 
 	switch (ctrl->id) {
 	case V4L2_CID_EXPOSURE:
-		ret = cci_write(gc2083->regmap, GC2083_REG_EXPOSURE,
-				ctrl->val & GC2083_EXPOSURE_MASK, NULL);
+		cci_write(gc2083->regmap, GC2083_REG_EXPOSURE,
+			  ctrl->val & GC2083_EXPOSURE_MASK, &ret);
 		break;
 	case V4L2_CID_ANALOGUE_GAIN:
 		ret = gc2083_set_gain(gc2083, ctrl->val);
 		break;
 	case V4L2_CID_VBLANK:
-		ret = cci_write(gc2083->regmap, GC2083_REG_VTS,
-				format->height + ctrl->val, NULL);
+		cci_write(gc2083->regmap, GC2083_REG_VTS,
+			  format->height + ctrl->val, &ret);
 		break;
 	case V4L2_CID_HFLIP:
 	case V4L2_CID_VFLIP:
@@ -799,7 +824,12 @@ static int gc2083_stop_streaming(struct gc2083 *gc2083)
 {
 	int ret = 0;
 
-	/* Verbatim from the vendor's gc2083_standby(). */
+	/*
+	 * Verbatim from the vendor's gc2083_standby(). cci_write() short-circuits
+	 * once @ret is set, so the first failure stops the sequence rather than
+	 * hammering a bus that is not answering; the sensor is powered down by
+	 * runtime PM below in any case.
+	 */
 	cci_write(gc2083->regmap, GC2083_REG_MIPI_EN, 0x00, &ret);
 	cci_write(gc2083->regmap, GC2083_REG_PLL_CTRL, 0x00, &ret);
 	cci_write(gc2083->regmap, GC2083_REG_PWR_CTRL, 0x01, &ret);
@@ -1080,13 +1110,20 @@ static int gc2083_probe(struct i2c_client *client)
 	pm_runtime_enable(dev);
 	pm_runtime_set_autosuspend_delay(dev, 1000);
 	pm_runtime_use_autosuspend(dev);
-	pm_runtime_idle(dev);
 
 	ret = v4l2_async_register_subdev_sensor(&gc2083->sd);
 	if (ret) {
 		dev_err_probe(dev, ret, "failed to register subdev\n");
 		goto err_rpm_disable;
 	}
+
+	/*
+	 * The sensor is powered and marked active, and nothing below can fail:
+	 * hand it to runtime PM to be suspended after the autosuspend delay.
+	 * Doing this any earlier races the error path below, which powers the
+	 * sensor off itself and must not find that autosuspend got there first.
+	 */
+	pm_runtime_idle(dev);
 
 	return 0;
 
