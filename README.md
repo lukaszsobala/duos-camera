@@ -74,8 +74,8 @@ On the host, against the kernel tree Armbian already built. For arm64 you need
 board. The worktree is root-owned, so if make complains about permissions run it
 with `sudo -E`. A gcc version mismatch warning against the kernel's gcc is
 expected and harmless for a module this small; if `insmod` rejects it anyway,
-build on the board instead with the linux-headers package installed and
-`make KDIR=/lib/modules/$(uname -r)/build`.
+build on the board instead - see "Building on the board itself" below, which is
+the shorter route to a module that is certain to match.
 
 ## Running it
 
@@ -189,9 +189,11 @@ should be enough; the `remote-endpoint` deliberately points at nothing:
 
 Put it in `arch/<arch>/boot/dts/sophgo/overlay/` as a `.dtso` following the
 pattern of the existing `sg2000-*.dtso` files, enable it with
-`overlays=<name>` in `/boot/armbianEnv.txt`, and watch dmesg. A successful
-probe is silent; a failure names its reason (`missing endpoint node`, `chip id
-mismatch`, `failed to get xclk`). Note that if this works it also supersedes
+`overlays=<name>` in `/boot/armbianEnv.txt`, and watch dmesg. Or skip the
+rebuild entirely and compile it on the board - see "Building on the board
+itself" below, which has a version of this overlay that `dtc` accepts as-is.
+A successful probe is silent; a failure names its reason (`missing endpoint
+node`, `chip id mismatch`, `failed to get xclk`). Note that if this works it also supersedes
 Test 1 entirely - the driver enables MCLK itself, so `duos-mclk.ko` becomes
 redundant.
 
@@ -235,3 +237,174 @@ what the vendor's own AE loop does with the same table.
   generator probably exists and would be genuinely useful for bringing up the
   CSI receiver without optics. Not implemented because the semantics could not
   be confirmed rather than because it is not wanted.
+
+---
+
+# Building on the board itself
+
+Everything above builds on a host and copies the result across. Most of it
+builds just as well on the Duo S itself, and it is worth knowing which parts:
+
+|                          | On the board?                                            |
+|--------------------------|----------------------------------------------------------|
+| `duos-mclk.ko`           | yes, and it is the easy way to get the vermagic right    |
+| the device tree overlay  | yes, and it needs no kernel build at all, host or board  |
+| `gc2083.ko`              | only against an image that has the V4L2 core - see below |
+| the kernel itself        | no, in any practical sense                               |
+
+The reason to bother is that a module built on the board cannot have the wrong
+`vermagic`, the wrong arch or the wrong gcc: there is one kernel and one
+toolchain and they are both the right ones. No cross compiler, no root-owned
+worktree, no `sudo -E`.
+
+## Getting a toolchain and headers
+
+    apt install build-essential
+    apt install linux-headers-bleedingedge-sophgo-sg200x-arm64   # see below
+
+The headers package is named `linux-headers-<branch>-sophgo-sg200x-<arch>` -
+`bleedingedge` or `edge`, `arm64` or `riscv64`, matching the image.
+`armbian-config` under System does the same if you would rather not guess.
+If the image came out of your own build rather than an Armbian download, the
+`.deb` is already sitting in `output/debs/` next to the image; copy that one
+over and `dpkg -i` it, because its version has to match `uname -r` exactly.
+
+Two things are worth knowing before you start it on a board running from an SD
+card. It is not small - about 110MB to fetch and 85MB in 26,000 files unpacked
+into `/usr/src`. And installing it is not just an unpack: the postinst runs
+`make olddefconfig`, `make scripts`, `make M=scripts/mod` and
+`tools/bpf/resolve_btfids` on the board, which takes a few minutes on this SoC.
+It pulls in `make`, `gcc`, `libc6-dev`, `bison`, `flex`, `libssl-dev`,
+`libelf-dev` and `pahole` as dependencies, so `build-essential` is belt and
+braces rather than strictly required.
+
+What you get at the end is `/lib/modules/$(uname -r)/build` pointing at
+`/usr/src/linux-headers-<version>`. Every Makefile here defaults `KDIR` to
+exactly that, so once the symlink exists nothing needs an argument.
+
+## duos-mclk.ko
+
+    scp -r duos-mclk root@duos:/root/
+    ssh root@duos 'cd /root/duos-mclk && make'
+
+That is the whole thing - no `ARCH`, no `CROSS_COMPILE`, no `KDIR`. Then move
+the `.ko` next to the probe script, since the script looks for `./duos-mclk.ko`
+beside itself:
+
+    ssh root@duos 'cp /root/duos-mclk/duos-mclk.ko /root/ && cd /root && sh duos-cam-j1-probe.sh'
+
+This is the answer whenever the prebuilt `duos-mclk.ko` here is rejected - wrong
+arch, wrong kernel version, or `insmod` complaining about the module format. It
+also costs nothing to redo after every kernel upgrade, which the prebuilt one
+does not survive.
+
+## The device tree overlay
+
+This one is the real win, because it needs no kernel build anywhere. Armbian's
+boot script for this family loads two sets of overlays: `overlays=` from the
+kernel's own `/boot/dtb/sophgo/overlay/`, and `user_overlays=` from
+`/boot/overlay-user/`. The second is yours, and `dtc` on the board is enough to
+fill it:
+
+    apt install device-tree-compiler
+    dtc -@ -I dts -O dtb -o /boot/overlay-user/duos-cam.dtbo duos-cam.dts
+
+then `user_overlays=duos-cam` in `/boot/armbianEnv.txt` and reboot.
+`armbian-add-overlay duos-cam.dts` does both steps if the image has it.
+
+The catch is that neither `dtc` nor `armbian-add-overlay` runs the C
+preprocessor, so the version under "Getting it to probe" above will not compile
+as written - `CLK_CAM0` and `GPIO_ACTIVE_LOW` come from headers that are not
+there. Written out numerically it becomes:
+
+    /dts-v1/;
+    /plugin/;
+
+    &i2c3 {
+        status = "okay";
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        gc2083: sensor@37 {
+            compatible = "galaxycore,gc2083";
+            reg = <0x37>;
+            clocks = <&clk 147>;                /* CLK_CAM0 */
+            assigned-clocks = <&clk 147>;
+            assigned-clock-rates = <24000000>;
+            reset-gpios = <&porta 2 1>;         /* GPIO_ACTIVE_LOW */
+
+            port {
+                gc2083_out: endpoint {
+                    data-lanes = <1 2>;
+                    link-frequencies = /bits/ 64 <185625000>;
+                };
+            };
+        };
+    };
+
+`147` is `CLK_CAM0` from `include/dt-bindings/clock/sophgo,cv1800.h` and `1` is
+`GPIO_ACTIVE_LOW`; both are ABI, so writing them out is ugly rather than
+fragile. The two cell counts are not decoration - a fragment has no parent
+context, so without them `dtc` reads `reg = <0x37>` against the default
+`#address-cells = <2>` and warns that it is the wrong length.
+
+That much has been checked: it compiles with `dtc -@`, and `fdtoverlay` merges
+it into the built `sg2000-milkv-duo-s.dtb` with `&i2c3`, `&clk` and `&porta` all
+resolving and `sensor@37` landing under `/soc/i2c@4030000`. The base dtb carries
+a `__symbols__` node, which is what U-Boot's `fdt apply` needs for the same
+thing to work at boot. It has still never been booted.
+
+None of which does anything on a stock image - the node will just sit there
+unbound, because there is no `gc2083` driver to claim it. It is only useful
+once the driver is in the image, and then it saves rebuilding to change the
+node.
+
+## gc2083.ko
+
+The driver is a single self-contained `.c` file, so mechanically it builds out
+of tree like anything else - `obj-m += gc2083.o` and the same one-line Makefile
+as `duos-mclk/`. Against a stock Armbian kernel it does not get far, and the way
+it fails is worth spelling out because it is not a linker problem:
+
+    gc2083.c:840: error: 'v4l2_subdev_get_fmt' undeclared here
+    gc2083.c:1018: error: implicit declaration of function 'devm_cci_regmap_init_i2c'
+
+Those two are declared behind `CONFIG_VIDEO_V4L2_SUBDEV_API` and
+`CONFIG_V4L2_CCI_I2C`, neither of which is set, so the *headers* do not offer
+them. Force both on and the compile is clean, and then modpost stops instead:
+
+    ERROR: modpost: "cci_read" [gc2083.ko] undefined!
+    ERROR: modpost: "cci_write" [gc2083.ko] undefined!
+    ERROR: modpost: "cci_multi_reg_write" [gc2083.ko] undefined!
+    ERROR: modpost: "devm_cci_regmap_init_i2c" [gc2083.ko] undefined!
+    ERROR: modpost: "v4l2_subdev_get_fmt" [gc2083.ko] undefined!
+
+because the modules that export them were never built. This is the same gap
+described under State, just seen from the other end; it was reproduced against
+the `7.2__sophgo-sg200x-riscv64__riscv64` worktree rather than on hardware.
+
+So building on the board is not a way around Test 2's image build. What it is
+good for is everything after it. Once an image built with
+`CONFIG_VIDEO_GC2083=m` is on the card, its headers declare and export all of
+the above - `VIDEO_CAMERA_SENSOR` selects `MEDIA_CONTROLLER`, `V4L2_FWNODE` and
+`VIDEO_V4L2_SUBDEV_API`, and the driver's own Kconfig entry selects
+`V4L2_CCI_I2C` - and the loop becomes
+
+    make && rmmod gc2083; insmod gc2083.ko && dmesg -w
+
+on the board, with no reflash between attempts. For a driver that has never once
+been run against hardware, that loop is the difference between an afternoon and
+a week.
+
+One config note if you want the toolchain in place before the driver is: adding
+`CONFIG_VIDEO_DEV=m` alone is not enough for an out-of-tree build, because
+nothing then selects `V4L2_CCI_I2C`. Add `CONFIG_V4L2_CCI_I2C=m` explicitly.
+
+## The kernel itself
+
+Not seriously. Half a gigabyte of RAM, no swap by default beyond zram, and the
+rootfs on an SD card, against a build that wants an hour on a laptop. It can be
+made to work with swap on USB storage and enough patience, but there is no
+reason to: the cross build on the host is the supported path and it is what
+every instruction above assumes. The point of this section is the two things
+that do not need it.
