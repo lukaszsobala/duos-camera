@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Milk-V Duo S: the blue user LED.
+ *
+ *     XGPIOA[29]   IIC0_SDA, function 3
+ *
+ * Enable with
+ *
+ *     overlays=duos-led
+ *
+ * in /boot/armbianEnv.txt.
+ *
+ * The LED is driven through a MOSFET, so the line is active high. Without this
+ * overlay nothing in the kernel claims XGPIOA[29]: U-Boot's cvi_board_init()
+ * muxes the pad to GPIO and leaves it as an input, and the pad's default pull
+ * is enough to light the LED. That is why a stock Armbian image comes up with
+ * it on and no way to control it short of poking /sys/class/gpio.
+ *
+ * With the overlay it becomes an ordinary LED class device, off at boot:
+ *
+ *     /sys/class/leds/blue:status/brightness
+ *
+ * Set default-state = "on" below, or attach the heartbeat trigger at runtime,
+ * if a boot indicator is wanted instead.
+ *
+ * The pinmux group is here so the mux does not depend on which bootloader ran.
+ * Nothing else is set: the pad's electrical configuration is already right for
+ * a MOSFET gate, and its power-source register belongs to the VDDIO_EMMC domain
+ * that the SD card shares - not somewhere to write speculatively.
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/pinctrl/pinctrl-sg2000.h>
+
+&pinctrl {
+	led_cfg: led-cfg {
+		led-pins {
+			pinmux = <PINMUX(PIN_IIC0_SDA, 3)>;
+		};
+	};
+};
+
+&{/} {
+	leds {
+		compatible = "gpio-leds";
+		pinctrl-names = "default";
+		pinctrl-0 = <&led_cfg>;
+
+		led-0 {
+			gpios = <&porta 29 GPIO_ACTIVE_HIGH>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_STATUS;
+			default-state = "off";
+		};
+	};
+};
