@@ -7,10 +7,15 @@ the build.
 Two things live here, and they are testable independently:
 
 1. **`duos-cam-j1-probe.sh` + `duos-mclk/`** - a smoke test that answers "does
-   the sensor answer on I2C at all". Needs nothing rebuilt. Do this first.
+   the sensor answer on I2C at all". Needs nothing rebuilt. Do this first. It
+   **passes**: `0x37` answers and the chip ID reads `0x20 0x83`.
 2. **`gc2083.c` + `galaxycore,gc2083.yaml` + `patches/`** - a mainline-style
    V4L2 sensor driver. Needs a kernel rebuild, and can only be partly tested
    until there is a CSI-2 receiver driver for the SG2000.
+
+`tools/` holds one thing the probe wants and the image may not have: a 40-line
+`/dev/mem` peek/poke, for boards whose busybox was built without the `devmem`
+applet.
 
 `led/` is unrelated to the camera - it turns the blue user LED off. It is here
 only because this is where Duo S odds and ends that are not in the build live.
@@ -97,17 +102,74 @@ The line that matters is the i2c-3 scan, and then the chip ID, which should read
   confirmed: mainline pinctrl, the clock driver's `CLK_CAM0` mux, the GPIO, the
   i2c alias, and the wiring table above. The camera plan is grounded; the only
   missing piece is the SoC-side CSI/ISP driver.
-- **0x37 appears without the module having loaded** - the sensor does not need
-  MCLK to talk. Same conclusion, one less moving part.
-- **Nothing on i2c-3, and `clk_summary` shows `clk_cam0` at 0Hz or a wrong
-  rate** - the clock is the problem, not the wiring. The fix is in
-  `clk-cv1800.c`'s `clk_cam0` mux/divider and it is a bounded one.
-- **Nothing on i2c-3, `clk_cam0` looks right, and the pinmux dump shows nothing
-  for `IIC3_*`** - U-Boot's pinmux did not survive. `&i2c3` in the base DTS
-  needs a `pinctrl-0` of its own. Worth fixing regardless of the camera.
+- **0x37 appears only with reset asserted, or only in one of the two sweep
+  passes** - the polarity in the wiring table above is wrong.
+- **Nothing on i2c-3, and the idle-level read is not `1 1`** - the bus is stuck
+  or shorted, and no sensor could answer on it whatever else is right.
 
 Note this only exercises the control path. It says nothing about whether the
 MIPI lanes work.
+
+## Result: it passes
+
+Run against a CAM-GC2083 on J1 of a Duo S, riscv64 7.2.0-rc7: `0x37` answers and
+the chip ID reads `0x20 0x83`. Every line of the wiring table above is now
+measured rather than inferred, and so is a bit more:
+
+- **The pinmux survives U-Boot.** `CAM_MCLK0`, `IIC3_SCL` and `IIC3_SDA` read back
+  mux 0 and `CAM_RST0` reads mux 3, which is exactly `CAM_MCLK0__CAM_MCLK0`,
+  `IIC3_SCL__IIC3_SCL`, `IIC3_SDA__IIC3_SDA` and `CAM_RST0__XGPIOA_2` from the
+  vendor's own `cv181x_pinlist_swconfig.h`. `&i2c3` does **not** need a
+  `pinctrl-0` for the mux. `UNCLAIMED` in `pinmux-pins` is not evidence of
+  anything - it only means no driver took a pinctrl reference.
+- **`CLK_CAM0` is the right clock and 23.76MHz is not a bug.** The vendor asks
+  for 24MHz off the same `cam0pll` in `_cif_enable_snsr_clk()` and lands on the
+  same number.
+- **`duos-mclk.ko` is not missing anything.** The vendor's
+  `CVI_MIPI_ENABLE_SENSOR_CLOCK` ioctl reduces, on the common-clk path, to
+  `clk_set_rate` + `clk_prepare_enable` and nothing else - no MIPI-RX wrapper
+  register, and its `PINMUX_CONFIG(CAM_MCLK0, CAM_MCLK0)` is commented out
+  because it relies on U-Boot too.
+- **Reset is `XGPIOA_2` and it is active low**, confirmed the direct way: `0x37`
+  is present with `GPIOA_2` high, gone with it low, back when it goes high again.
+- **Nothing is cross-wired.** i2c-1, i2c-2 and i2c-4 are empty, so `bus_id = 3`
+  from the vendor's `sensor_cfg_GC2083.ini` is the whole story.
+- **No power-down line is stuck asserted.** Every other CV181x/SG200x board in
+  the vendor tree muxes `CAM_PD0` to `XGPIOA_1`; the Duo S board file
+  deliberately does not.
+
+### What it cost, so the next person does not repeat it
+
+The first several runs found nothing, and the cause was **the FPC in upside
+down**. Every measurement along the way was a true negative, and two of them are
+worth remembering because they look like faults and are not:
+
+- The pads' reset-default bias *is* pull-down rather than pull-up (`conf 0x48`,
+  `PIN_IO_PULLDOWN`), because `PINMUX_CONFIG()` in U-Boot writes only the fmux
+  register and mainline gives `&i2c3` no `pinctrl-0` to set the rest. It looks
+  like a bug and it is not: the board's own pull-ups win, and `&i2c3` needs no
+  `pinctrl-0` for the bias either. Do not "fix" this. The proof is in the errno
+  and it was there in the very first failing run: the DesignWare driver returns
+  `-EREMOTEIO` for a NACK and `-EAGAIN` for arbitration loss
+  (`i2c-designware-common.c`), so `Remote I/O error` at `conf 0x48` means the
+  controller sampled SDA released high at the ACK bit. A line genuinely held
+  down by that pull-down could not have produced it.
+- The Duo S carries its own SDA/SCL pull-ups, so **the bus idles high with no
+  camera attached at all**. A `1 1` from the idle-level read says nothing about
+  whether the module has power, and a board with a reversed cable is
+  indistinguishable, line for line, from a board with an empty connector. That
+  cost the most time of anything here.
+
+If a future run comes up empty, check the cable orientation before anything else:
+open the J1 latch, look at which wall of the slot the contact fingers are on, and
+put the FPC's gold fingers against it.
+
+### One thing still unmeasured
+
+**Does the sensor answer without MCLK?** The passing run had `duos-mclk.ko`
+loaded before the scan, so this is untested. Reboot and scan before loading it.
+It is cheap, and it is the last thing that would change what the driver's device
+tree node has to guarantee before its first register read.
 
 ## Undoing it
 
