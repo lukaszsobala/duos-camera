@@ -150,13 +150,34 @@
 #define  VIP_RESET_CSI_MAC0		BIT(12)
 
 /*
- * MIPI pad pull-up/pull-down control, one 8-byte pair per PHY lane, indexed
- * from the top of the window: vendor's PSD_CTRL_OFFSET(n) = (5 - n) * 8. The
- * two words are the two halves of the differential pair.
+ * A note on what is deliberately missing: the vendor clears the pull-up and
+ * pull-down on each MIPI pad before bringing the link up, at
+ * PSD_CTRL_OFFSET(n) = 0x03001c30 + (5 - n) * 8, one 8-byte pair per PHY lane.
+ *
+ * We do not, because those are not our registers. 0x03001c30 lands inside the
+ * pinctrl block's "sys" window (0x03001000 + 0x1000), which pinctrl requests
+ * exclusively - asking for it fails probe with -EBUSY, which is how this was
+ * found. The vendor gets away with it only because its bring-up predates having
+ * a pinctrl driver at all.
+ *
+ * The mapping is exact, so the proper fix is cheap when it is needed: the
+ * vendor's offset for lane n is the pinctrl conf register of MIPIRX<n>N, and
+ * offset + 4 is MIPIRX<n>P. From pinctrl-sg2000.c, MIPIRX0N is at 0xc58 and
+ * MIPIRX0P at 0xc5c, which is 0x03001c58/0x03001c5c - i.e. (5 - 0) * 8 = 40
+ * past 0x03001c30. Lanes 1 and 2 line up the same way (0xc50, 0xc48).
+ *
+ * Expressed properly that is a pinctrl group on this node with
+ * bias-pull-up = <0> and bias-pull-down = <0> on MIPIRX0N/0P, MIPIRX1N/1P and
+ * MIPIRX2N/2P. It is not done yet for one reason: the binding requires both
+ * "pinmux" and "power-source" in a pin group, so it cannot be config-only, and
+ * asserting a mux value for these pads without knowing the right one risks
+ * breaking pads that currently work.
+ *
+ * Leaving the pads at their reset default is a defensible starting point - these
+ * are dedicated differential D-PHY pads in their own 1.8V VDD18A_MIPI domain,
+ * where an enabled pull would be surprising - and it is self-checking: if the
+ * PHY locks, the question was moot. If it does not, this is on the list.
  */
-#define PAD_CTRL_LANE(n)		((5 - (n)) * 8)
-#define  PAD_CTRL_PU			BIT(2)
-#define  PAD_CTRL_PD			BIT(3)
 
 /*
  * The Duo S wiring, from the vendor's own sensor parameters
@@ -223,7 +244,6 @@ struct duos_csi {
 
 	void __iomem *mac;
 	void __iomem *wrap;
-	void __iomem *pad;
 	void __iomem *vip_sys;
 
 	struct clk_bulk_data *clks;
@@ -273,22 +293,6 @@ static void duos_csi_set_lane_selects(struct duos_csi *csi)
 	duos_csi_update(csi->wrap, WRAP_PHY_TOP_04, MIPIRX_SEL_CLK_CHANNEL,
 			FIELD_PREP(MIPIRX_SEL_CLK_CHANNEL,
 				   BIT(DUOS_CLK_LANE)));
-}
-
-/* Clear the pad pull-up/pull-down on every lane we use. */
-static void duos_csi_clear_pad_pull(struct duos_csi *csi)
-{
-	static const u8 lanes[] = { DUOS_CLK_LANE, DUOS_DATA_LANE0,
-				    DUOS_DATA_LANE1 };
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(lanes); i++) {
-		u32 off = PAD_CTRL_LANE(lanes[i]);
-
-		duos_csi_update(csi->pad, off, PAD_CTRL_PU | PAD_CTRL_PD, 0);
-		duos_csi_update(csi->pad, off + 4,
-				PAD_CTRL_PU | PAD_CTRL_PD, 0);
-	}
 }
 
 static void duos_csi_set_deskew(struct duos_csi *csi)
@@ -427,7 +431,6 @@ static void duos_csi_link_up(struct duos_csi *csi)
 	duos_csi_reset(csi);
 
 	duos_csi_set_lane_selects(csi);
-	duos_csi_clear_pad_pull(csi);
 
 	/*
 	 * Free-running clock direction. The vendor picks this whenever the
@@ -704,10 +707,6 @@ static int duos_csi_get_resources(struct platform_device *pdev,
 	csi->wrap = devm_platform_ioremap_resource_byname(pdev, "csi_wrap0");
 	if (IS_ERR(csi->wrap))
 		return PTR_ERR(csi->wrap);
-
-	csi->pad = devm_platform_ioremap_resource_byname(pdev, "pad_ctrl");
-	if (IS_ERR(csi->pad))
-		return PTR_ERR(csi->pad);
 
 	csi->vip_sys = devm_platform_ioremap_resource_byname(pdev, "vip_sys");
 	if (IS_ERR(csi->vip_sys))

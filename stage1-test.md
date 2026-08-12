@@ -124,6 +124,12 @@ module parameters, so no rebuild - sweep in this order:
 default", which is what the vendor does for this sensor - a non-zero value is
 going beyond them, not fixing an omission.
 
+**No lock at all, and the deskew sweep does nothing.** The MIPI pad
+pull-up/pull-down is the one thing the vendor does that this driver does not -
+those registers belong to pinctrl and cannot simply be claimed. See the pad note
+in [receiver-plan.md](receiver-plan.md) for what the pinctrl-shaped fix looks
+like; it needs a mux value established first.
+
 **`clk hs 1` but the decode format is wrong, or ECC errors stream in.** The PHY
 is locked and the packets are garbage, which points at the lane mapping rather
 than the timing. The experiment is swapping the two data lanes:

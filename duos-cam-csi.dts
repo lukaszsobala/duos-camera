@@ -85,11 +85,19 @@
 	csi_rx: csi-rx@a0c2000 {
 		compatible = "milkv,duos-csi";
 
+		/*
+		 * No MIPI pad-control window here. The vendor clears the pad
+		 * pull-up/pull-down at 0x03001c30, but that address is inside
+		 * pinctrl's own "sys" window (0x03001000 + 0x1000) and pinctrl
+		 * requests it exclusively, so claiming it fails probe with
+		 * -EBUSY. The pads stay at their reset default; see the long
+		 * note in duos-csi.c for the pinctrl-shaped fix if that turns
+		 * out to matter.
+		 */
 		reg = <0x0a0c2000 0x2000>,
 		      <0x0a0d0000 0x1000>,
-		      <0x03001c30 0x30>,
 		      <0x0a0c8000 0x20>;
-		reg-names = "csi_mac0", "csi_wrap0", "pad_ctrl", "vip_sys";
+		reg-names = "csi_mac0", "csi_wrap0", "vip_sys";
 
 		clocks = <&clk 99>,	/* CLK_AXI_VIP */
 			 <&clk 128>,	/* CLK_CFG_REG_VIP */

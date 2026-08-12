@@ -190,9 +190,36 @@ With `lane_id = {1, 0, 2}` every lane we use is on port 0, so `clk_port = 0`.
 1. **Clocks and resets.** Enable the CIF clocks, deassert `RST_CSIPHY0` and
    `RST_CSIPHY0RST_APB`. Note `cif_init()` and `cif_reset()` in `cif_drv.c` are
    both empty - there is no magic init step being hidden.
-2. **Pad pull-up/down clear.** For each of PHY lanes 1, 0, 2: read
-   `pad_ctrl + (5 - lane) * 8`, clear bits 2 and 3, write it back; then the same
-   at `+ 4`. That is the differential pair's two pads.
+2. **Pad pull-up/down clear - skipped, and it cannot be done this way.** The
+   vendor reads `0x03001c30 + (5 - lane) * 8`, clears bits 2 and 3, writes it
+   back, then the same at `+ 4` for the pair's other pad.
+
+   That address is inside **pinctrl's** "sys" window (`0x03001000 + 0x1000`),
+   which pinctrl requests exclusively, so a driver asking for it fails probe with
+   `-EBUSY`. Confirmed on hardware: `can't request region for resource [mem
+   0x03001c30-0x03001c5f]`. The vendor gets away with it only because its
+   bring-up predates there being a pinctrl driver at all.
+
+   The mapping to pinctrl is exact, which makes the proper fix cheap later. The
+   vendor's offset for lane n is the conf register of `MIPIRX<n>N`, and `+ 4` is
+   `MIPIRX<n>P`. From `pinctrl-sg2000.c`: `MIPIRX0N` at `0xc58`, `MIPIRX0P` at
+   `0xc5c` - i.e. `0x03001c58`, which is `(5 - 0) * 8 = 40` past `0x03001c30`.
+   Lanes 1 and 2 are `0xc50` and `0xc48`, matching `(5 - 1) * 8` and
+   `(5 - 2) * 8`.
+
+   Expressed properly that is a pinctrl group on the receiver node with
+   `bias-pull-up = <0>` and `bias-pull-down = <0>` over MIPIRX0N/0P, 1N/1P and
+   2N/2P. Note `bias-disable` will **not** work - `pinctrl-cv18xx.c` handles
+   `PIN_CONFIG_BIAS_PULL_UP`/`_DOWN` but falls through to `-ENOTSUPP` for
+   `PIN_CONFIG_BIAS_DISABLE` - and the group cannot be config-only, because
+   `sophgo,cv1800-pinctrl.yaml` requires both `pinmux` and `power-source`. That
+   last point is why it is not done yet: it means asserting a mux value for these
+   pads, and guessing one risks breaking pads that work today.
+
+   The pads are therefore left at their reset default. That is defensible -
+   these are dedicated differential D-PHY pads in their own 1.8V `VDD18A_MIPI`
+   domain, where an enabled pull would be surprising - and self-checking: if the
+   PHY locks, the question was moot.
 3. **Lane mapping.** `cif_set_lane_id(ctx, i, lane_id[i], 0)` for logical
    i = 0,1,2 -> physical 1,0,2, with no P/N swap. Then park the unused PHY
    lanes: the driver walks the leftover bitmask (`tbl` ends up `0x18`) and calls
