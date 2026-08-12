@@ -97,6 +97,18 @@
 #define GC2083_RGB_DEPTH		10
 
 /*
+ * Temporary, for bring-up. Applies the vendor's resume-from-standby register
+ * sequence on stream-on, which is what this driver used to do unconditionally
+ * and which stops the sensor from ever transmitting. Here only so both
+ * behaviours can be compared on hardware in one session; it should go once the
+ * receiver reports a locked link. See gc2083_start_streaming().
+ */
+static bool stream_on_restart;
+module_param(stream_on_restart, bool, 0644);
+MODULE_PARM_DESC(stream_on_restart,
+		 "apply the vendor resume-from-standby sequence on stream on (known broken)");
+
+/*
  * 1920 * 1125 lines of 2200 pixels at 30fps is a 74.25MHz pixel rate, which
  * over two lanes of RAW10 is 371.25Mbit/s per lane, so 185.625MHz of DDR clock.
  */
@@ -794,23 +806,49 @@ static int gc2083_start_streaming(struct gc2083 *gc2083)
 		goto err_rpm_put;
 	}
 
-	/* The vendor lets the sensor settle this long before enabling MIPI. */
+	/*
+	 * The vendor's own settle delay, at the end of
+	 * gc2083_linear_1080p30_init() and after its equivalent of the control
+	 * sync above.
+	 */
 	fsleep(GC2083_INIT_SETTLE_US);
 
 	/*
-	 * Stream on. Verbatim from the vendor's gc2083_restart(): the PLL is
-	 * retimed before the MIPI transmitter is enabled, and the 1us gap
-	 * after the 0x03f9 write is the vendor's, not a guess.
+	 * That is the whole start sequence. The mode table ends by configuring
+	 * the MIPI block (0x023e), and in the vendor SDK writing the table *is*
+	 * starting the stream: gc2083_init() calls
+	 * gc2083_linear_1080p30_init() and nothing else.
+	 *
+	 * This driver used to follow it with the vendor's gc2083_restart()
+	 * sequence, which was a mistake. cvi_sns_ctrl.h documents pfnRestart as
+	 * "restart sensor from standby mode" and the middleware only calls it
+	 * out of SAMPLE_COMM_VI_ResumeSensor(), paired with pfnStandby - it is a
+	 * resume path, not a start path, and it does not even restore what the
+	 * mode table set: 0x03f7 becomes 0x11 where the table wants 0x01, and
+	 * 0x03f9 becomes 0x42 where the table wants 0x43. On a normal start the
+	 * vendor never writes 0x003e at all.
+	 *
+	 * Measured on hardware with the CSI receiver's per-pad diagnostic: with
+	 * the restart values applied the sensor sits in LP-11 idle and never
+	 * transmits; writing the mode table's values back over i2c makes the LP
+	 * lines start toggling again. Reproducible in both directions.
 	 */
-	cci_write(gc2083->regmap, GC2083_REG_PLL_MODE, 0x42, &ret);
-	if (ret)
-		goto err_rpm_put;
-	fsleep(1);
-	cci_write(gc2083->regmap, GC2083_REG_PLL_CTRL, 0x11, &ret);
-	cci_write(gc2083->regmap, GC2083_REG_PWR_CTRL, 0x8e, &ret);
-	cci_write(gc2083->regmap, GC2083_REG_MIPI_EN, 0x91, &ret);
-	if (ret)
-		goto err_rpm_put;
+	if (stream_on_restart) {
+		/*
+		 * The old, wrong sequence, kept only so the two can be compared
+		 * on hardware without a rebuild. Do not enable this expecting it
+		 * to work.
+		 */
+		cci_write(gc2083->regmap, GC2083_REG_PLL_MODE, 0x42, &ret);
+		if (ret)
+			goto err_rpm_put;
+		fsleep(1);
+		cci_write(gc2083->regmap, GC2083_REG_PLL_CTRL, 0x11, &ret);
+		cci_write(gc2083->regmap, GC2083_REG_PWR_CTRL, 0x8e, &ret);
+		cci_write(gc2083->regmap, GC2083_REG_MIPI_EN, 0x91, &ret);
+		if (ret)
+			goto err_rpm_put;
+	}
 
 	return 0;
 
