@@ -349,6 +349,64 @@ during startup" from "erroring continuously":
     sleep 1
     cat $D/csi_status
 
+### Where stage 1 actually stands
+
+Four hardware runs in. The receiver is configured correctly - every register
+reads back as intended - and the link does not come up. What has been ruled out,
+so none of it gets re-tried:
+
+- **The lane mapping.** At idle, exactly three pads read LP-11 and the other
+  three read nothing, and the three are the ones the vendor's `lane_id` names.
+  The ribbon and the mapping are right.
+- **The MAC clock source.** `VIP_SYS_CLK_CTRL1` bits [5:4] already read `0x2` at
+  baseline; the bootloader sets it. Writing it again changes nothing. The theory
+  was wrong, and the code is kept only because "the clk framework says the clock
+  is enabled" remains a real trap on this SoC.
+- **The MIPI pad bias**, which belongs to pinctrl and was never grantable. Left
+  at reset default, and nothing suggests it matters.
+- **The sensor's start sequence** - this one was a real bug, see the gc2083
+  commit. The driver was applying the vendor's resume-from-standby registers on
+  a cold start, which held the sensor in LP-11 idle. Fixing it made lanes 0 and 1
+  start toggling LP and took the clock lane out of stop state. Necessary, not
+  sufficient.
+- **Every PHY tuning knob**, via `tools/stage1-sweep.sh`: `T_HS_SETTLE` from 2 to
+  128, `MIPIRX_EN_LOW_BAND_RXAFE` 0-3 alone and combined, deskew phases, and P/N
+  swap on both lane groups. About thirty configurations, and **the pad state did
+  not change in any of them** - not even an error counter moved.
+
+That invariance is the most useful thing we have. If the receive path were the
+limiting factor, some setting would have changed something. Nothing did, which
+says the receiver is not being given a high-speed burst to fail on.
+
+Two observations that now read differently:
+
+- `data static` is **not** independent evidence. `AD_D<n>_DATA` is sampled on the
+  byte clock recovered from the clock lane, so with `clk hs 0` it cannot update
+  no matter what the sensor is doing.
+- Lane 2 flat at `lp 0/0` is not necessarily a dead lane. Both LP comparators
+  read 0 when a pair is driven differentially, so that is also what a lane parked
+  in HS-0 looks like. Combined with a clock lane flapping LP without ever
+  reaching HS, the shape of it is a data lane driver that is enabled and a MIPI
+  PLL that is not producing a usable clock - which is the sensor's side, not
+  ours.
+
+One loose thread on that side: the mode table's last write is `0x023e = 0x99`,
+and it reads back `0x00`. That is either a write-only register or a write that is
+not landing, and we do not know which. Several other registers in the `0x00xx`
+range behave the same way, which is why it was originally dismissed.
+
+### The next step is a known-good diff, not another theory
+
+`tools/phy-dump.sh` and `tools/sensor-dump.sh` read the SoC receiver registers
+and the sensor registers respectively, and both run on either stack. Taken on the
+vendor 5.10 image with the camera actually streaming, they give the register
+values of a configuration that demonstrably produces frames, and the diff against
+ours is a list of candidates instead of a guess. `tools/devmem.c` already exists
+for the `/dev/mem` side; `STRICT_DEVMEM` is unset on these kernels.
+
+Take the sensor dump seriously as the more likely half. Three of the four wrong
+turns so far were on the SoC side, and the one real bug was in the sensor driver.
+
 ### If the PHY will not lock
 
 In order of likelihood, and all three are module parameters so none needs a
