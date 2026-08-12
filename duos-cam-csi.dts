@@ -1,0 +1,120 @@
+/*
+ * GC2083 on J1 of a Milk-V Duo S, with the stage 1 CSI-2 receiver.
+ *
+ * This supersedes duos-cam.dts. The difference is that csi-sink is no longer a
+ * stub: it is a real node with the CSI MAC, the D-PHY wrapper, the MIPI pad
+ * control and the VIP subsystem control registers, plus the clocks and resets
+ * that make those windows respond. duos-csi.ko binds to it.
+ *
+ * Keep duos-cam.dts around - it is still the right overlay for testing the
+ * sensor alone against duos-cam-stub.ko, which touches no receiver registers.
+ * Load one or the other, not both.
+ *
+ * Numeric constants rather than dt-bindings macros because neither dtc nor
+ * armbian-add-overlay runs the C preprocessor. All of these are ABI, so this is
+ * ugly rather than fragile:
+ *
+ *   include/dt-bindings/clock/sophgo,cv1800.h
+ *     147 = CLK_CAM0          125 = CLK_PAD_VI_VIP
+ *      99 = CLK_AXI_VIP       128 = CLK_CFG_REG_VIP
+ *     106 = CLK_CSI_MAC0_VIP  109 = CLK_CSI0_RX_VIP
+ *     102 = CLK_SRC_VIP_SYS_2
+ *
+ *   arch/riscv/boot/dts/sophgo/cv18xx-reset.h - and note that mainline's copy
+ *   does not have these two names yet; the indices are from the vendor's
+ *   cv181x-resets.h, whose numbering is identical where the two overlap
+ *   (RST_VIPSYS 6, RST_I2C0 27, RST_GPIO0 44 all match).
+ *      70 = RST_CSIPHY0
+ *      71 = RST_CSIPHY0RST_APB
+ *
+ *     1 = GPIO_ACTIVE_LOW (include/dt-bindings/gpio/gpio.h)
+ *
+ * The receiver node goes under /soc rather than / because it needs `reg`, and
+ * /soc is the simple-bus with #address-cells = <1> that all the other MMIO
+ * nodes live on. The interrupts are deliberately absent: stage 1 takes no
+ * interrupt, it polls status through sysfs. Stage 2 adds
+ * SOC_PERIPHERAL_IRQ(8) for the CSIBDG frame-done.
+ *
+ * post-init-providers on the sensor is still required, and for the same reason
+ * as before: without it fw_devlink makes the sensor wait for csi-sink, which is
+ * both a module that may not be loaded and the wrong way round.
+ *
+ *   dtc -@ -I dts -O dtb -o /boot/overlay-user/duos-cam-csi.dtbo duos-cam-csi.dts
+ *   # then user_overlays=duos-cam-csi in /boot/armbianEnv.txt, and reboot
+ */
+
+/dts-v1/;
+/plugin/;
+
+&i2c3 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	gc2083: sensor@37 {
+		compatible = "galaxycore,gc2083";
+		reg = <0x37>;
+
+		clocks = <&clk 147>;			/* CLK_CAM0 */
+		assigned-clocks = <&clk 147>;
+		assigned-clock-rates = <24000000>;
+
+		reset-gpios = <&porta 2 1>;		/* XGPIOA_2, GPIO_ACTIVE_LOW */
+
+		post-init-providers = <&csi_rx>;
+
+		port {
+			gc2083_out: endpoint {
+				remote-endpoint = <&csi_rx_in>;
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64 <185625000>;
+			};
+		};
+	};
+};
+
+&{/soc} {
+	/*
+	 * As with i2c3 above: a fragment carries no parent context, so without
+	 * these dtc reads the reg below against the default #address-cells = <2>
+	 * and warns about its length. /soc really is 1/1.
+	 */
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	csi_rx: csi-rx@a0c2000 {
+		compatible = "milkv,duos-csi";
+
+		reg = <0x0a0c2000 0x2000>,
+		      <0x0a0d0000 0x1000>,
+		      <0x03001c30 0x30>,
+		      <0x0a0c8000 0x20>;
+		reg-names = "csi_mac0", "csi_wrap0", "pad_ctrl", "vip_sys";
+
+		clocks = <&clk 99>,	/* CLK_AXI_VIP */
+			 <&clk 128>,	/* CLK_CFG_REG_VIP */
+			 <&clk 106>,	/* CLK_CSI_MAC0_VIP */
+			 <&clk 109>,	/* CLK_CSI0_RX_VIP */
+			 <&clk 125>,	/* CLK_PAD_VI_VIP */
+			 <&clk 102>;	/* CLK_SRC_VIP_SYS_2 */
+		clock-names = "axi", "cfg_reg", "csi_mac0", "csi0_rx",
+			      "pad_vi", "vip_sys2";
+
+		resets = <&rst 70>, <&rst 71>;	/* CSIPHY0, CSIPHY0 APB */
+		reset-names = "phy", "phy-apb";
+
+		port {
+			csi_rx_in: endpoint {
+				remote-endpoint = <&gc2083_out>;
+				/*
+				 * The sensor's logical lanes. The physical
+				 * mapping on this board - clock on PHY lane 1,
+				 * data on 0 and 2 - is a constant in
+				 * duos-csi.ko for now; it becomes a property
+				 * here when the driver is shaped for upstream.
+				 */
+				data-lanes = <1 2>;
+			};
+		};
+	};
+};

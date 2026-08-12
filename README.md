@@ -623,6 +623,27 @@ can see the lanes - and only some registers read back at all. `MIPI_EN`
 
 ---
 
+# Test 4: the real receiver
+
+The stub's wall - no receiver, so nothing observes the lanes - is what
+`duos-csi/` starts to take down. It is the same V4L2 plumbing as the stub plus
+the D-PHY and CSI-2 MAC programming, so the sensor's lanes are terminated and
+decoded and the MAC can be asked whether it is receiving valid CSI-2. Still no
+frames: that is the next stage.
+
+It supersedes `duos-cam-stub.ko`, and `duos-cam-csi.dts` supersedes
+`duos-cam.dts`. Load one pair or the other, not both. The stub stays useful for
+testing the sensor with the receiver deliberately absent.
+
+**To run it, follow [stage1-test.md](stage1-test.md)** - the procedure, the pass
+conditions, and what to do about each way it can fail. **The design and the
+register map are in [receiver-plan.md](receiver-plan.md)**, including where every
+constant came from. Everything the plan needed from the vendor SDK is recorded
+there, so none of it has to be re-derived from
+`~/Software/armbian/duo-buildroot-sdk-v2`.
+
+---
+
 # Building on the board itself
 
 Everything above builds on a host and copies the result across. Most of it
