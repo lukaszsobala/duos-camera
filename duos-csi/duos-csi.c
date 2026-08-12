@@ -32,8 +32,12 @@
  *   osdrv/interdrv/cif/chip/cv181x/drv/inc/reg_fields_csi_{mac,wrap}.h
  *
  * The vendor driver is generic across CV180x/CV181x, five input formats and two
- * links. This is one board, one link, CSI-2 RAW10 only, with the Duo S lane
- * mapping resolved to constants rather than carried in a config struct.
+ * links. This is one board, one link, CSI-2 RAW10 only.
+ *
+ * When nothing works, read lane_data first. It reports what each physical pad is
+ * doing regardless of how the lane mux is programmed, which is the one
+ * measurement that separates "the sensor is silent" from "the sensor is fine and
+ * our lane mapping is wrong".
  */
 
 #include <linux/bitfield.h>
@@ -141,6 +145,24 @@
 #define  AUTO_IGNORE			BIT(16)
 #define  AUTO_SYNC			BIT(17)
 
+/*
+ * Per-physical-pad observation, and the most useful thing in this driver when
+ * nothing works. AD_D<n>_DATA is the raw sampled byte off pad n and
+ * AD_LPOUTP/AD_LPOUTN are the low-power receiver outputs for all six pads' two
+ * halves. All of it is *before* the lane mux, so it reports what is physically
+ * arriving on each pad no matter how the lane selects are programmed - which is
+ * how you tell "the sensor is silent" from "the sensor is fine, the clock is on
+ * a different pad than we think".
+ */
+#define WRAP_PHY_TOP_70			(WRAP_TOP + 0x70)
+#define WRAP_PHY_TOP_74			(WRAP_TOP + 0x74)
+#define WRAP_PHY_TOP_7C			(WRAP_TOP + 0x7c)
+#define  AD_LPOUTN			GENMASK(5, 0)
+#define  AD_LPOUTP			GENMASK(21, 16)
+
+#define DUOS_NUM_PHY_LANES		6
+#define DUOS_LANE_SAMPLES		512
+
 /* PHY state, reported as two 16-bit halves. See duos_csi_phy_state(). */
 #define WRAP_4L_DBG_90			(WRAP_4L + 0x90)
 #define WRAP_4L_DBG_94			(WRAP_4L + 0x94)
@@ -208,14 +230,26 @@
  * which is what selects the free-running clock direction and the "cross" deskew
  * phases below.
  */
-#define DUOS_CLK_LANE			1
-#define DUOS_DATA_LANE0			0
-#define DUOS_DATA_LANE1			2
 #define DUOS_NUM_DATA_LANES		2
 
-/* Unused PHY lanes still get parked on a distinct select value. */
-#define DUOS_PARK_LANE0			3
-#define DUOS_PARK_LANE1			4
+/*
+ * Module parameters, not constants, because the vendor's lane_id comes from a
+ * per-SoC sensor file rather than a per-board one - so it is the reference
+ * design's wiring, and only assumed to be the Duo S's. If the PHY does not lock,
+ * sweeping clk_lane across 0..5 while watching lane_data is the cheap way to
+ * find the truth without a rebuild.
+ */
+static u8 clk_lane = 1;
+module_param(clk_lane, byte, 0644);
+MODULE_PARM_DESC(clk_lane, "PHY lane carrying the CSI-2 clock (default 1)");
+
+static u8 data_lane0;
+module_param(data_lane0, byte, 0644);
+MODULE_PARM_DESC(data_lane0, "PHY lane carrying data lane 0 (default 0)");
+
+static u8 data_lane1 = 2;
+module_param(data_lane1, byte, 0644);
+MODULE_PARM_DESC(data_lane1, "PHY lane carrying data lane 1 (default 2)");
 
 /*
  * Deskew phases, from the vendor's lane_phase[] table
@@ -305,15 +339,35 @@ static void duos_csi_update(void __iomem *base, u32 reg, u32 mask, u32 val)
  */
 static void duos_csi_set_lane_selects(struct duos_csi *csi)
 {
+	u8 park[2] = { 3, 4 };
+	unsigned long unused;
+	unsigned int i = 0;
+	int lane;
+
+	/*
+	 * Park the PHY lanes we are not using, the way the vendor does: it walks
+	 * a bitmask of leftover lanes and gives each one to a spare logical
+	 * lane. Skipping it would leave D2_SEL/D3_SEL pointing at lanes we are
+	 * also using, which is a mux conflict. Computed rather than hardcoded so
+	 * that sweeping clk_lane stays consistent.
+	 */
+	unused = GENMASK(4, 0) &
+		 ~(BIT(clk_lane) | BIT(data_lane0) | BIT(data_lane1));
+	for_each_set_bit(lane, &unused, 5) {
+		park[i++] = lane;
+		if (i == ARRAY_SIZE(park))
+			break;
+	}
+
 	duos_csi_update(csi->wrap, WRAP_4L_08, CSI_LANE_CK_SEL,
-			FIELD_PREP(CSI_LANE_CK_SEL, DUOS_CLK_LANE));
+			FIELD_PREP(CSI_LANE_CK_SEL, clk_lane));
 	duos_csi_update(csi->wrap, WRAP_4L_04,
 			CSI_LANE_D0_SEL | CSI_LANE_D1_SEL |
 			CSI_LANE_D2_SEL | CSI_LANE_D3_SEL,
-			FIELD_PREP(CSI_LANE_D0_SEL, DUOS_DATA_LANE0) |
-			FIELD_PREP(CSI_LANE_D1_SEL, DUOS_DATA_LANE1) |
-			FIELD_PREP(CSI_LANE_D2_SEL, DUOS_PARK_LANE0) |
-			FIELD_PREP(CSI_LANE_D3_SEL, DUOS_PARK_LANE1));
+			FIELD_PREP(CSI_LANE_D0_SEL, data_lane0) |
+			FIELD_PREP(CSI_LANE_D1_SEL, data_lane1) |
+			FIELD_PREP(CSI_LANE_D2_SEL, park[0]) |
+			FIELD_PREP(CSI_LANE_D3_SEL, park[1]));
 
 	/* No P/N swap anywhere on this board. */
 	duos_csi_update(csi->wrap, WRAP_4L_08,
@@ -324,12 +378,12 @@ static void duos_csi_set_lane_selects(struct duos_csi *csi)
 	/* PHYA clock channel select is a bitmask, not an index. */
 	duos_csi_update(csi->wrap, WRAP_PHY_TOP_04, MIPIRX_SEL_CLK_CHANNEL,
 			FIELD_PREP(MIPIRX_SEL_CLK_CHANNEL,
-				   BIT(DUOS_CLK_LANE)));
+				   BIT(clk_lane)));
 }
 
 static void duos_csi_set_deskew(struct duos_csi *csi)
 {
-	static const u8 data_lanes[] = { DUOS_DATA_LANE0, DUOS_DATA_LANE1 };
+	const u8 data_lanes[] = { data_lane0, data_lane1 };
 	unsigned int i;
 
 	/*
@@ -338,11 +392,11 @@ static void duos_csi_set_deskew(struct duos_csi *csi)
 	 * number. Every lane this board uses is below 4.
 	 */
 	duos_csi_update(csi->wrap, WRAP_PHY_TOP_84,
-			0xffU << (8 * DUOS_CLK_LANE),
-			(u32)deskew_clk << (8 * DUOS_CLK_LANE));
+			0xffU << (8 * clk_lane),
+			(u32)deskew_clk << (8 * clk_lane));
 	duos_csi_update(csi->wrap, WRAP_PHY_TOP_80,
-			FORCE_DESKEW_CODE(DUOS_CLK_LANE),
-			deskew_clk ? FORCE_DESKEW_CODE(DUOS_CLK_LANE) : 0);
+			FORCE_DESKEW_CODE(clk_lane),
+			deskew_clk ? FORCE_DESKEW_CODE(clk_lane) : 0);
 
 	for (i = 0; i < ARRAY_SIZE(data_lanes); i++) {
 		u8 lane = data_lanes[i];
@@ -722,6 +776,87 @@ static DEVICE_ATTR_WO(clear_errors);
  * register value on a wrongly clocked block is the failure that wasted the most
  * time getting here.
  */
+/*
+ * Sample every physical pad and say what it is doing. This is the diagnostic
+ * that separates the two remaining explanations for a dead link.
+ *
+ * A MIPI lane parked in LP-11 idle reads lp 1/1. A lane transmitting in
+ * high-speed drops both LP outputs to 0 and its sampled data byte changes from
+ * one read to the next. So:
+ *
+ *   - every pad lp 1/1 and no data movement  -> the sensor is not transmitting,
+ *     and the problem is upstream of this driver entirely;
+ *   - some pads active, but not the ones we selected -> the sensor is fine and
+ *     the lane mapping is wrong; the active pads name the correct clk_lane and
+ *     data lanes directly.
+ *
+ * A single read cannot see a 371Mbps signal, so the point is not the value but
+ * whether it changes across DUOS_LANE_SAMPLES back-to-back reads.
+ */
+static ssize_t lane_data_show(struct device *dev, struct device_attribute *attr,
+			      char *buf)
+{
+	struct duos_csi *csi = dev_get_drvdata(dev);
+	u8 first[DUOS_NUM_PHY_LANES], changed[DUOS_NUM_PHY_LANES] = {};
+	u8 lp_p_set = 0, lp_p_clr = 0, lp_n_set = 0, lp_n_clr = 0;
+	unsigned int i, lane;
+	int len;
+
+	guard(mutex)(&csi->lock);
+
+	for (i = 0; i < DUOS_LANE_SAMPLES; i++) {
+		u32 d03 = readl(csi->wrap + WRAP_PHY_TOP_70);
+		u32 d45 = readl(csi->wrap + WRAP_PHY_TOP_74);
+		u32 lp = readl(csi->wrap + WRAP_PHY_TOP_7C);
+		u8 data[DUOS_NUM_PHY_LANES];
+
+		data[0] = d03 & 0xff;
+		data[1] = (d03 >> 8) & 0xff;
+		data[2] = (d03 >> 16) & 0xff;
+		data[3] = (d03 >> 24) & 0xff;
+		data[4] = d45 & 0xff;
+		data[5] = (d45 >> 8) & 0xff;
+
+		for (lane = 0; lane < DUOS_NUM_PHY_LANES; lane++) {
+			if (!i)
+				first[lane] = data[lane];
+			else if (data[lane] != first[lane])
+				changed[lane] = 1;
+		}
+
+		/* Track both polarities so a toggling LP output shows as "x". */
+		lp_p_set |= FIELD_GET(AD_LPOUTP, lp);
+		lp_p_clr |= ~FIELD_GET(AD_LPOUTP, lp) & GENMASK(5, 0);
+		lp_n_set |= FIELD_GET(AD_LPOUTN, lp);
+		lp_n_clr |= ~FIELD_GET(AD_LPOUTN, lp) & GENMASK(5, 0);
+	}
+
+	len = sysfs_emit(buf, "samples %u\n", DUOS_LANE_SAMPLES);
+
+	for (lane = 0; lane < DUOS_NUM_PHY_LANES; lane++) {
+		const char *role = "";
+
+		if (lane == clk_lane)
+			role = " <- clk";
+		else if (lane == data_lane0)
+			role = " <- data0";
+		else if (lane == data_lane1)
+			role = " <- data1";
+
+		len += sysfs_emit_at(buf, len,
+				     "lane %u lp %s/%s data %s%s\n", lane,
+				     (lp_p_set & BIT(lane)) ?
+					((lp_p_clr & BIT(lane)) ? "x" : "1") : "0",
+				     (lp_n_set & BIT(lane)) ?
+					((lp_n_clr & BIT(lane)) ? "x" : "1") : "0",
+				     changed[lane] ? "toggling" : "static",
+				     role);
+	}
+
+	return len;
+}
+static DEVICE_ATTR_RO(lane_data);
+
 static ssize_t regs_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
@@ -777,6 +912,7 @@ static struct attribute *duos_csi_attrs[] = {
 	&dev_attr_phy_state.attr,
 	&dev_attr_csi_status.attr,
 	&dev_attr_clear_errors.attr,
+	&dev_attr_lane_data.attr,
 	&dev_attr_regs.attr,
 	NULL,
 };
