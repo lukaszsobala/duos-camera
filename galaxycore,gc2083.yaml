@@ -23,7 +23,10 @@ properties:
 
   clocks:
     maxItems: 1
-    description: Input clock (MCLK), 24MHz.
+    description:
+      Input clock (MCLK). The sensor's published timings, and the driver's,
+      assume 24MHz; the sensor itself will run at other rates, with everything
+      derived from MCLK scaling accordingly.
 
   avdd-supply:
     description: Analogue power supply, 2.8V.

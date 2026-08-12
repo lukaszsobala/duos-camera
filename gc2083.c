@@ -1033,6 +1033,7 @@ static int gc2083_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct gc2083 *gc2083;
+	unsigned long rate;
 	int ret;
 
 	gc2083 = devm_kzalloc(dev, sizeof(*gc2083), GFP_KERNEL);
@@ -1050,11 +1051,23 @@ static int gc2083_probe(struct i2c_client *client)
 		return dev_err_probe(dev, PTR_ERR(gc2083->regmap),
 				     "failed to init CCI\n");
 
-	gc2083->xclk = devm_v4l2_sensor_clk_get_legacy(dev, NULL, true,
-						       GC2083_XCLK_FREQ);
+	gc2083->xclk = devm_v4l2_sensor_clk_get(dev, NULL);
 	if (IS_ERR(gc2083->xclk))
 		return dev_err_probe(dev, PTR_ERR(gc2083->xclk),
 				     "failed to get xclk\n");
+
+	/*
+	 * Every timing in the mode table is derived from a 24MHz input, and
+	 * nothing here recalculates them, so a board that cannot produce
+	 * exactly 24MHz still works but reports frame rates and a link
+	 * frequency that are wrong in the same proportion. Say so rather than
+	 * fail: the error is small on the boards seen so far, and refusing to
+	 * probe would help nobody.
+	 */
+	rate = clk_get_rate(gc2083->xclk);
+	if (rate != GC2083_XCLK_FREQ)
+		dev_warn(dev, "xclk is %lu Hz, not %lu Hz; timings will be off by the same ratio\n",
+			 rate, (unsigned long)GC2083_XCLK_FREQ);
 
 	ret = gc2083_get_regulators(gc2083);
 	if (ret)

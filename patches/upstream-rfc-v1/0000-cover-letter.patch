@@ -1,0 +1,81 @@
+From bd98e45e5a8d4d3f861df592cadfc9e925efb726 Mon Sep 17 00:00:00 2001
+From: Lukasz Sobala <lsobala1@gmail.com>
+Date: Wed, 12 Aug 2026 01:46:16 +0200
+Subject: [RFC PATCH 0/2] media: i2c: GalaxyCore GC2083 sensor driver
+
+This adds a driver and a binding for the GalaxyCore GC2083, a 1920x1080
+10-bit Bayer sensor with a two-lane CSI-2 output. It is the sensor on
+Milk-V's CAM-GC2083 module, the camera sold for the Duo and Duo S.
+
+It is an RFC because of one thing, stated up front: no frame has ever
+come out of this driver. The Sophgo SG2000 on the Duo S has no mainline
+CSI-2 receiver and no mainline ISP, so there is nothing downstream of the
+sensor to receive pixels, and there is no other board in tree with this
+sensor on it. Everything below was tested against real silicon over I2C,
+and none of it involves a captured image.
+
+What is known to work on hardware:
+
+ - probe, including the chip ID read (0x2083)
+ - runtime PM: the sensor genuinely loses power when suspended (register
+   reads NAK) and answers again when resumed, with no clock reference
+   leaked across repeated module load/unload and bind/unbind cycles
+ - the control ranges, cross-checked arithmetically against the vendor's
+   timings
+ - s_stream(1), which writes the full init table and the stream-on
+   sequence and returns success, with exposure and frame length reading
+   back byte-exact afterwards
+
+To get that far I wrote a throwaway platform driver that registers a
+v4l2_device, waits for the sensor via the async notifier and calls
+v4l2_device_register_subdev_nodes(), purely so that a /dev/v4l-subdev0
+exists for v4l2-ctl to open. It is not part of this series and is not
+proposed for upstream; it is mentioned only so it is clear how the above
+was exercised.
+
+What is therefore unverified, and what I would most like review on:
+
+ - the Bayer order. SRGGB10 comes from the vendor's board files. Nothing
+   here can confirm it.
+ - whether the mirror and flip registers take effect. They are documented
+   as shadowed and they read back as 0x00 on this part, so the writes
+   cannot be observed on the bus and the result cannot be observed
+   anywhere else either.
+ - which parts of the vendor's init sequence are load-bearing. There is
+   no public datasheet; the register table is reproduced as-is from
+   GalaxyCore's reference settings carried in Sophgo's
+   duo-buildroot-sdk-v2, and most of it is undocumented.
+
+Two smaller notes:
+
+ - The mode timings assume a 24MHz MCLK and are not recalculated from the
+   actual rate. The Duo S clock tree cannot make exactly 24MHz - the
+   nearest it reaches is 23.76MHz - so probe warns and carries on rather
+   than failing, and the reported frame rate and link frequency are that
+   0.99 out. Making the driver derive its timings from clk_get_rate()
+   would be a bigger change than I wanted to make blind; I am happy to do
+   it if that is preferred.
+ - There is no DTS patch. A sensor node with nothing at the far end of
+   its graph does not probe - fwnode_graph_get_endpoint_by_id() skips
+   endpoints whose remote is unavailable - so an in-tree node has to wait
+   for an SG2000 receiver driver to exist.
+
+Based on v7.2-rc7. dt_binding_check and checkpatch --strict are clean,
+and the driver builds warning-free at W=1 for riscv.
+
+Lukasz Sobala (2):
+  dt-bindings: media: i2c: add GalaxyCore GC2083
+  media: i2c: add GalaxyCore GC2083 sensor driver
+
+ .../bindings/media/i2c/galaxycore,gc2083.yaml |  110 ++
+ MAINTAINERS                                   |    8 +
+ drivers/media/i2c/Kconfig                     |   10 +
+ drivers/media/i2c/Makefile                    |    1 +
+ drivers/media/i2c/gc2083.c                    | 1200 +++++++++++++++++
+ 5 files changed, 1329 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/media/i2c/galaxycore,gc2083.yaml
+ create mode 100644 drivers/media/i2c/gc2083.c
+
+-- 
+2.53.0
+
