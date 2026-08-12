@@ -187,6 +187,31 @@ the constants below are resolved rather than symbolic. Macros are at
 
 With `lane_id = {1, 0, 2}` every lane we use is on port 0, so `clk_port = 0`.
 
+0. **Give the MAC a clock source.** `vip_sys + 0x1c` is
+   `VIP_SYS_VIP_CLK_CTRL1`; bits [5:4] select CSI MAC0's functional clock and the
+   vendor writes `0x2`, "use vip_sys2", in `_cif_set_mac_clk()`.
+
+   **This is not visible to the clock framework and it is not optional.**
+   Mainline models `clk_csi_mac0_vip` as a bare `CV1800_GATE`, so enabling that
+   clock opens a gate and says nothing about what is behind it; the mux lives in
+   the VIP subsystem's own register space with no clk provider wrapping it.
+
+   Missing it cost a test round trip, and the symptom is worth recognising
+   because it looks like progress: the PHY's LP comparator is asynchronous, so
+   `clk stop` reads 1 and the line state looks plausible, while everything
+   synchronous - `clk hs`, the decode format, every packet and error counter -
+   stays at exactly zero.
+
+   The same function also sets the vip_sys2 rate, via a vendor-specific clock
+   ratio block or, on a non-Cvitek clk driver, a direct write to `0x03002110`.
+   That register belongs to mainline's clk driver, so the mainline equivalent is
+   `clk_set_rate()` on `CLK_SRC_VIP_SYS_2` - deliberately **not** done yet. It is
+   a `CV1800_BYPASS_MUX` with its own divider and no `CLK_SET_RATE_PARENT`, so a
+   rate set should stay local rather than propagating into a fractional PLL, but
+   "should" is not good enough next to a known machine-hanging PLL bug. The
+   `regs` attribute reports both rates instead, so the next run says whether this
+   matters at all.
+
 1. **Clocks and resets.** Enable the CIF clocks, deassert `RST_CSIPHY0` and
    `RST_CSIPHY0RST_APB`. Note `cif_init()` and `cif_reset()` in `cif_drv.c` are
    both empty - there is no magic init step being hidden.

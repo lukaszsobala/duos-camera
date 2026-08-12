@@ -150,6 +150,26 @@
 #define  VIP_RESET_CSI_MAC0		BIT(12)
 
 /*
+ * VIP_SYS_VIP_CLK_CTRL1. Two bits per CSI MAC select where that MAC's
+ * functional clock comes from; the vendor writes 0x2, "use vip_sys2", in
+ * _cif_set_mac_clk() before configuring anything.
+ *
+ * This one is not optional and it is not visible to the clock framework.
+ * Mainline models clk_csi_mac0_vip as a bare gate (clk-cv1800.c,
+ * CV1800_GATE(clk_csi_mac0_vip, ...)), so enabling that clock opens the gate but
+ * says nothing about what is behind it - the mux lives here, in the VIP
+ * subsystem's own register space, with no clk provider wrapping it.
+ *
+ * Symptom when it is missed: the PHY's LP comparator still reports the line
+ * state, because that is asynchronous, so clk_stop reads 1 and looks
+ * encouraging. Everything synchronous - clk_hs, the decode format, every error
+ * and packet counter - stays at zero, because the MAC has no clock to run on.
+ */
+#define VIP_SYS_CLK_CTRL1		0x1c
+#define  VIP_CLK_CTRL1_CSI_MAC0		GENMASK(5, 4)
+#define  VIP_CLK_CTRL1_SRC_VIP_SYS2	0x2
+
+/*
  * A note on what is deliberately missing: the vendor clears the pull-up and
  * pull-down on each MIPI pad before bringing the link up, at
  * PSD_CTRL_OFFSET(n) = 0x03001c30 + (5 - n) * 8, one 8-byte pair per PHY lane.
@@ -237,6 +257,18 @@ MODULE_PARM_DESC(hs_settle, "T_HS_SETTLE override, 0 to leave at reset default")
 static const char * const duos_csi_decode_fmt[] = {
 	"YUV422-8", "YUV422-10", "RAW8", "RAW10", "RAW12",
 };
+
+/*
+ * Clock order, shared between the name table used to fetch them and the two
+ * rates the regs attribute reports.
+ */
+#define DUOS_CLK_AXI			0
+#define DUOS_CLK_CFG_REG		1
+#define DUOS_CLK_CSI_MAC0		2
+#define DUOS_CLK_CSI0_RX		3
+#define DUOS_CLK_PAD_VI			4
+#define DUOS_CLK_VIP_SYS2		5
+#define DUOS_NUM_CLKS			6
 
 struct duos_csi {
 	struct v4l2_device v4l2_dev;
@@ -428,6 +460,15 @@ static void duos_csi_clear_errors(struct duos_csi *csi)
 /* Bring the link up. Caller holds the lock. */
 static void duos_csi_link_up(struct duos_csi *csi)
 {
+	/*
+	 * Give the MAC a clock source before anything else. See the comment on
+	 * VIP_SYS_CLK_CTRL1: without this the MAC gate is open onto nothing.
+	 */
+	duos_csi_update(csi->vip_sys, VIP_SYS_CLK_CTRL1,
+			VIP_CLK_CTRL1_CSI_MAC0,
+			FIELD_PREP(VIP_CLK_CTRL1_CSI_MAC0,
+				   VIP_CLK_CTRL1_SRC_VIP_SYS2));
+
 	duos_csi_reset(csi);
 
 	duos_csi_set_lane_selects(csi);
@@ -673,12 +714,70 @@ static ssize_t clear_errors_store(struct device *dev,
 }
 static DEVICE_ATTR_WO(clear_errors);
 
+/*
+ * Everything programmed, read back. This exists because each test round trip on
+ * this board is expensive: when the link does not come up, the first question is
+ * always "did the writes land at all", and answering it from a status register
+ * alone is guesswork. Also reports the two clock rates, since a plausible
+ * register value on a wrongly clocked block is the failure that wasted the most
+ * time getting here.
+ */
+static ssize_t regs_show(struct device *dev, struct device_attribute *attr,
+			 char *buf)
+{
+	struct duos_csi *csi = dev_get_drvdata(dev);
+	int len;
+
+	guard(mutex)(&csi->lock);
+
+	len = sysfs_emit(buf,
+			 "vip_sys clk_ctrl1 0x%08x resets 0x%08x\n",
+			 readl(csi->vip_sys + VIP_SYS_CLK_CTRL1),
+			 readl(csi->vip_sys + VIP_SYS_RESETS));
+
+	len += sysfs_emit_at(buf, len,
+			     "mac sensor_00 0x%08x csi_00 0x%08x csi_04 0x%08x\n"
+			     "mac csi_18 0x%08x csi_40 0x%08x csi_60 0x%08x csi_70 0x%08x\n",
+			     readl(csi->mac + MAC_SENSOR_MAC_00),
+			     readl(csi->mac + MAC_CSI_00),
+			     readl(csi->mac + MAC_CSI_04),
+			     readl(csi->mac + MAC_CSI_18),
+			     readl(csi->mac + MAC_CSI_40),
+			     readl(csi->mac + MAC_CSI_60),
+			     readl(csi->mac + MAC_CSI_70));
+
+	len += sysfs_emit_at(buf, len,
+			     "wrap top_00 0x%08x top_04 0x%08x top_80 0x%08x top_84 0x%08x\n"
+			     "wrap 4l_00 0x%08x 4l_04 0x%08x 4l_08 0x%08x 4l_0c 0x%08x 4l_10 0x%08x\n"
+			     "wrap 4l_dbg90 0x%08x 4l_dbg94 0x%08x\n",
+			     readl(csi->wrap + WRAP_PHY_TOP_00),
+			     readl(csi->wrap + WRAP_PHY_TOP_04),
+			     readl(csi->wrap + WRAP_PHY_TOP_80),
+			     readl(csi->wrap + WRAP_PHY_TOP_84),
+			     readl(csi->wrap + WRAP_4L_00),
+			     readl(csi->wrap + WRAP_4L_04),
+			     readl(csi->wrap + WRAP_4L_08),
+			     readl(csi->wrap + WRAP_4L_0C),
+			     readl(csi->wrap + WRAP_4L_10),
+			     readl(csi->wrap + WRAP_4L_DBG_90),
+			     readl(csi->wrap + WRAP_4L_DBG_94));
+
+	len += sysfs_emit_at(buf, len,
+			     "clk vip_sys2 %lu csi_mac0 %lu\n",
+			     clk_get_rate(csi->clks[DUOS_CLK_VIP_SYS2].clk),
+			     clk_get_rate(csi->clks[DUOS_CLK_CSI_MAC0].clk));
+
+	return len;
+}
+static DEVICE_ATTR_RO(regs);
+
 static struct attribute *duos_csi_attrs[] = {
 	&dev_attr_sensor.attr,
 	&dev_attr_stream.attr,
 	&dev_attr_phy_state.attr,
 	&dev_attr_csi_status.attr,
 	&dev_attr_clear_errors.attr,
+	&dev_attr_regs.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(duos_csi);
@@ -693,6 +792,8 @@ ATTRIBUTE_GROUPS(duos_csi);
 static const char * const duos_csi_clk_names[] = {
 	"axi", "cfg_reg", "csi_mac0", "csi0_rx", "pad_vi", "vip_sys2",
 };
+
+static_assert(ARRAY_SIZE(duos_csi_clk_names) == DUOS_NUM_CLKS);
 
 static int duos_csi_get_resources(struct platform_device *pdev,
 				  struct duos_csi *csi)
@@ -712,7 +813,7 @@ static int duos_csi_get_resources(struct platform_device *pdev,
 	if (IS_ERR(csi->vip_sys))
 		return PTR_ERR(csi->vip_sys);
 
-	csi->num_clks = ARRAY_SIZE(duos_csi_clk_names);
+	csi->num_clks = DUOS_NUM_CLKS;
 	csi->clks = devm_kcalloc(dev, csi->num_clks, sizeof(*csi->clks),
 				 GFP_KERNEL);
 	if (!csi->clks)
