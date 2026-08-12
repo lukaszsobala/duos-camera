@@ -106,6 +106,7 @@
 #define WRAP_4L				0x300
 
 #define WRAP_PHY_TOP_00			(WRAP_TOP + 0x00)
+#define  MIPIRX_EN_LOW_BAND_RXAFE	GENMASK(13, 12)
 #define  MIPIRX_PD_IBIAS		BIT(14)
 #define  MIPIRX_PD_RXLP			GENMASK(21, 16)
 
@@ -278,6 +279,32 @@ module_param(hs_settle, byte, 0644);
 MODULE_PARM_DESC(hs_settle, "T_HS_SETTLE override, 0 to leave at reset default");
 
 /*
+ * P/N swap. The vendor's sensor parameters say no swap on any lane, and at idle
+ * all three connected pads read LP-11, which a swapped pair could not do. So
+ * this is unlikely to be the answer - it is here because it is one register bit
+ * and the alternative is a rebuild.
+ */
+static bool clk_pn_swap;
+module_param(clk_pn_swap, bool, 0644);
+MODULE_PARM_DESC(clk_pn_swap, "swap P/N on the clock lane");
+
+static bool data_pn_swap;
+module_param(data_pn_swap, bool, 0644);
+MODULE_PARM_DESC(data_pn_swap, "swap P/N on both data lanes");
+
+/*
+ * MIPIRX_EN_LOW_BAND_RXAFE, two bits, left at its reset default by the vendor.
+ * Worth a sweep for one specific reason: this link runs at 371Mbps, which is
+ * slow for a D-PHY, and a receive AFE configured for a higher band is the kind
+ * of thing that gives working LP signalling and no HS lock - exactly what we
+ * see. That the vendor never writes it only means their default suits them.
+ */
+static u8 low_band = 0xff;
+module_param(low_band, byte, 0644);
+MODULE_PARM_DESC(low_band,
+		 "MIPIRX_EN_LOW_BAND_RXAFE value 0-3, 0xff to leave at reset default");
+
+/*
  * The decoder's format report. This is CSI_DECODE_FORMAT's bit order, which is
  * the vendor's enum csi_decode_fmt_e (cif_drv.h) - note it starts at YUV, so a
  * correctly received GC2083 stream sets bit 3 and nothing else.
@@ -369,11 +396,14 @@ static void duos_csi_set_lane_selects(struct duos_csi *csi)
 			FIELD_PREP(CSI_LANE_D2_SEL, park[0]) |
 			FIELD_PREP(CSI_LANE_D3_SEL, park[1]));
 
-	/* No P/N swap anywhere on this board. */
+	/* No P/N swap anywhere on this board, unless asked to try otherwise. */
 	duos_csi_update(csi->wrap, WRAP_4L_08,
 			CSI_LANE_CK_PNSWAP | CSI_LANE_D0_PNSWAP |
 			CSI_LANE_D1_PNSWAP | CSI_LANE_D2_PNSWAP |
-			CSI_LANE_D3_PNSWAP, 0);
+			CSI_LANE_D3_PNSWAP,
+			(clk_pn_swap ? CSI_LANE_CK_PNSWAP : 0) |
+			(data_pn_swap ? CSI_LANE_D0_PNSWAP |
+					CSI_LANE_D1_PNSWAP : 0));
 
 	/* PHYA clock channel select is a bitmask, not an index. */
 	duos_csi_update(csi->wrap, WRAP_PHY_TOP_04, MIPIRX_SEL_CLK_CHANNEL,
@@ -536,6 +566,11 @@ static void duos_csi_link_up(struct duos_csi *csi)
 			MIPIRX_SEL_CLK_P0TOP1 | MIPIRX_SEL_CLK_P1TOP0, 0);
 
 	duos_csi_set_deskew(csi);
+
+	if (low_band <= 3)
+		duos_csi_update(csi->wrap, WRAP_PHY_TOP_00,
+				MIPIRX_EN_LOW_BAND_RXAFE,
+				FIELD_PREP(MIPIRX_EN_LOW_BAND_RXAFE, low_band));
 
 	duos_csi_phy_enable(csi, false);
 	duos_csi_configure(csi);
