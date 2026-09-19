@@ -1,4 +1,4 @@
-From bd98e45e5a8d4d3f861df592cadfc9e925efb726 Mon Sep 17 00:00:00 2001
+From 9774494fcb68b33068cee4ee240b3d7edc69d14e Mon Sep 17 00:00:00 2001
 From: Lukasz Sobala <lsobala1@gmail.com>
 Date: Wed, 12 Aug 2026 01:45:39 +0200
 Subject: [RFC PATCH 2/2] media: i2c: add GalaxyCore GC2083 sensor driver
@@ -27,6 +27,16 @@ them are recalculated, so a board whose clock tree cannot produce exactly
 proportion. Probe warns about that rather than refusing to bind; the
 board this was developed on lands on 23.76MHz and works.
 
+Starting the stream is the mode table and nothing after it: in the vendor
+SDK gc2083_init() calls gc2083_linear_1080p30_init() and stops there, and
+the table's last writes configure the MIPI block. The vendor's
+gc2083_restart() is deliberately not used - cvi_sns_ctrl.h documents
+pfnRestart as "restart sensor from standby mode" and the middleware only
+calls it out of SAMPLE_COMM_VI_ResumeSensor(), paired with pfnStandby, so
+it is a resume path whose register values contradict the mode table's.
+Applying it on a cold start leaves the sensor in LP-11 idle, never
+transmitting.
+
 Supported: 1920x1080 at 30fps, RAW10, two lanes.
 
 Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
@@ -34,8 +44,8 @@ Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
  MAINTAINERS                |    8 +
  drivers/media/i2c/Kconfig  |   10 +
  drivers/media/i2c/Makefile |    1 +
- drivers/media/i2c/gc2083.c | 1200 ++++++++++++++++++++++++++++++++++++
- 4 files changed, 1219 insertions(+)
+ drivers/media/i2c/gc2083.c | 1205 ++++++++++++++++++++++++++++++++++++
+ 4 files changed, 1224 insertions(+)
  create mode 100644 drivers/media/i2c/gc2083.c
 
 diff --git a/MAINTAINERS b/MAINTAINERS
@@ -92,10 +102,10 @@ index e45359efe0e4..9b9a0b641371 100644
  obj-$(CONFIG_VIDEO_HI846) += hi846.o
 diff --git a/drivers/media/i2c/gc2083.c b/drivers/media/i2c/gc2083.c
 new file mode 100644
-index 000000000000..91efc694bf53
+index 000000000000..58915108b958
 --- /dev/null
 +++ b/drivers/media/i2c/gc2083.c
-@@ -0,0 +1,1200 @@
+@@ -0,0 +1,1205 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Driver for the GalaxyCore GC2083 image sensor
@@ -892,23 +902,28 @@ index 000000000000..91efc694bf53
 +		goto err_rpm_put;
 +	}
 +
-+	/* The vendor lets the sensor settle this long before enabling MIPI. */
++	/*
++	 * The vendor's own settle delay, at the end of
++	 * gc2083_linear_1080p30_init() and after its equivalent of the control
++	 * sync above.
++	 */
 +	fsleep(GC2083_INIT_SETTLE_US);
 +
 +	/*
-+	 * Stream on. Verbatim from the vendor's gc2083_restart(): the PLL is
-+	 * retimed before the MIPI transmitter is enabled, and the 1us gap
-+	 * after the 0x03f9 write is the vendor's, not a guess.
++	 * That is the whole start sequence. The mode table ends by configuring
++	 * the MIPI block (0x023e), and in the vendor SDK writing the table *is*
++	 * starting the stream: gc2083_init() calls gc2083_linear_1080p30_init()
++	 * and nothing else.
++	 *
++	 * In particular the vendor's gc2083_restart() is not part of it.
++	 * cvi_sns_ctrl.h documents pfnRestart as "restart sensor from standby
++	 * mode", and the middleware only calls it out of
++	 * SAMPLE_COMM_VI_ResumeSensor(), paired with pfnStandby - it is a resume
++	 * path, not a start path. Its register values contradict the mode
++	 * table's: 0x03f7 0x11 against the table's 0x01, and 0x03f9 0x42 against
++	 * the table's 0x43. Applying it on a cold start leaves the sensor in
++	 * LP-11 idle, never transmitting.
 +	 */
-+	cci_write(gc2083->regmap, GC2083_REG_PLL_MODE, 0x42, &ret);
-+	if (ret)
-+		goto err_rpm_put;
-+	fsleep(1);
-+	cci_write(gc2083->regmap, GC2083_REG_PLL_CTRL, 0x11, &ret);
-+	cci_write(gc2083->regmap, GC2083_REG_PWR_CTRL, 0x8e, &ret);
-+	cci_write(gc2083->regmap, GC2083_REG_MIPI_EN, 0x91, &ret);
-+	if (ret)
-+		goto err_rpm_put;
 +
 +	return 0;
 +

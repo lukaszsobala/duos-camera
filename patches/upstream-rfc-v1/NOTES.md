@@ -18,6 +18,10 @@ Armbian-numbered copies and are left alone.
 | `checkpatch --strict` | `./scripts/checkpatch.pl --strict --git db2ddb871435..HEAD` | clean apart from the "does MAINTAINERS need updating?" false positive on 1/2 — MAINTAINERS is updated in 2/2, which is the usual split |
 | build | `make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- W=1 drivers/media/i2c/gc2083.o` off `allmodconfig` | no warnings |
 
+All three were **re-run on 2026-09-20** after the start-sequence fix, with the
+same results; checkpatch reports the driver patch as "no obvious style problems
+and is ready for submission", 0 errors, 0 warnings, 0 checks over 1242 lines.
+
 dtschema lives in a venv at `linux-gc2083/.dtschema-venv` because the system
 Python has no pip. `checkpatch` prints a `ModuleNotFoundError: ply` traceback
 from `spdxcheck.py`; that is a missing system package, not a defect in the
@@ -65,12 +69,22 @@ and re-apply the cover letter text.
 
 ## Changed from the Armbian copies
 
-- `devm_v4l2_sensor_clk_get_legacy()` → `devm_v4l2_sensor_clk_get()`. The legacy
-  helper's own kernel-doc says it "must not be used in any new driver", and on
-  an OF platform it silently calls `clk_set_rate(24MHz)` and ignores what the
-  clock actually landed on — which is exactly how the 23.76MHz on this board
-  went unnoticed. The non-legacy helper leaves the rate to
-  `assigned-clock-rates` in DT.
-- Probe now reads `clk_get_rate()` and warns if it is not 24MHz.
-- The binding's `clocks` description says the timings assume 24MHz rather than
-  asserting the clock is 24MHz.
+The three differences this section used to list — the non-legacy
+`devm_v4l2_sensor_clk_get()`, the `clk_get_rate()` warning in probe, and the
+binding wording about 24MHz — were all folded back into the Armbian copies by
+the refresh, so the two have converged. As of 2026-09-20 the binding is
+byte-identical and the driver differs in exactly one way:
+
+- The Armbian copy keeps the old resume-from-standby sequence behind a
+  `stream_on_restart` module parameter, defaulting off, so both behaviours can
+  be compared on hardware without a rebuild. **This series does not have it**,
+  per the rule that bring-up scaffolding does not go upstream. If that parameter
+  is ever removed from the Armbian copy, the two files become identical again.
+
+## Still to decide before sending
+
+- **The base is still v7.2-rc7** while mainline has moved on. Rebase onto the
+  current -rc before posting, and re-run the three checks above.
+- **Version numbering.** These were regenerated in place as `RFC v1`. If the
+  original v1 was ever actually posted, this is a v2 and needs `-v2` plus a
+  changelog under the `---` line saying the stream-on sequence was dropped.

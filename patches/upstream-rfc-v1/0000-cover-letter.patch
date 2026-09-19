@@ -1,6 +1,6 @@
-From bd98e45e5a8d4d3f861df592cadfc9e925efb726 Mon Sep 17 00:00:00 2001
+From 9774494fcb68b33068cee4ee240b3d7edc69d14e Mon Sep 17 00:00:00 2001
 From: Lukasz Sobala <lsobala1@gmail.com>
-Date: Wed, 12 Aug 2026 01:46:16 +0200
+Date: Sun, 20 Sep 2026 01:17:28 +0200
 Subject: [RFC PATCH 0/2] media: i2c: GalaxyCore GC2083 sensor driver
 
 This adds a driver and a binding for the GalaxyCore GC2083, a 1920x1080
@@ -22,16 +22,22 @@ What is known to work on hardware:
    leaked across repeated module load/unload and bind/unbind cycles
  - the control ranges, cross-checked arithmetically against the vendor's
    timings
- - s_stream(1), which writes the full init table and the stream-on
-   sequence and returns success, with exposure and frame length reading
-   back byte-exact afterwards
+ - s_stream(1), which writes the full init table and returns success, with
+   exposure and frame length reading back byte-exact afterwards. On a cold
+   start the sensor's low-power lines then start toggling; applying the
+   vendor's resume-from-standby sequence in their place stops them, and
+   restoring the table's values starts them again, reproducibly in both
+   directions. That is the evidence for starting on the mode table alone.
 
 To get that far I wrote a throwaway platform driver that registers a
 v4l2_device, waits for the sensor via the async notifier and calls
 v4l2_device_register_subdev_nodes(), purely so that a /dev/v4l-subdev0
 exists for v4l2-ctl to open. It is not part of this series and is not
 proposed for upstream; it is mentioned only so it is clear how the above
-was exercised.
+was exercised. The low-power line observation above comes from a second
+throwaway driver for the SG2000's CSI-2 receiver, also out of tree and also
+not proposed here: it can see the lanes but has never reached high-speed
+lock, which is why there is still no captured frame.
 
 What is therefore unverified, and what I would most like review on:
 
@@ -71,8 +77,8 @@ Lukasz Sobala (2):
  MAINTAINERS                                   |    8 +
  drivers/media/i2c/Kconfig                     |   10 +
  drivers/media/i2c/Makefile                    |    1 +
- drivers/media/i2c/gc2083.c                    | 1200 +++++++++++++++++
- 5 files changed, 1329 insertions(+)
+ drivers/media/i2c/gc2083.c                    | 1205 +++++++++++++++++
+ 5 files changed, 1334 insertions(+)
  create mode 100644 Documentation/devicetree/bindings/media/i2c/galaxycore,gc2083.yaml
  create mode 100644 drivers/media/i2c/gc2083.c
 
