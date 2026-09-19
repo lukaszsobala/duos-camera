@@ -81,14 +81,26 @@ byte-identical and the driver differs in exactly one way:
   per the rule that bring-up scaffolding does not go upstream. If that parameter
   is ever removed from the Armbian copy, the two files become identical again.
 
+## Baseline while the work continues
+
+**Mainline, and deliberately not the media tree.** Decided 2026-09-20: the
+series stays on a mainline base (currently v7.2-rc7) until there is something
+worth posting. No frame has come out of the sensor yet, so the receiver is the
+work — tracking a moving subsystem branch before then is churn for its own sake,
+and `media-committers.git next` can itself be rebased. The base barely matters
+in the meantime: hardware testing runs the Armbian copy, which is built against
+the 7.2 and 7.3 branches, not against this tree. This tree only exists to
+generate the postable series.
+
 ## Before sending
 
 - **This is a v2.** Confirmed 2026-09-20: the original RFC v1 was posted, so the
   next posting is `--subject-prefix="RFC PATCH v2"` with a changelog under the
   `---` line of each patch (and in the cover letter), saying the vendor's
   resume-from-standby sequence is no longer applied on stream-on, and why.
-- **Rebase onto `media-committers.git` `next`, not onto a mainline -rc and not
-  onto linux-next.** The media subsystem states its own baseline rule in
+- **Then, and only then, rebase onto `media-committers.git` `next`** — not onto
+  a mainline -rc, and not onto linux-next. The media subsystem states its own
+  baseline rule in
   `Documentation/driver-api/media/maintainer-entry-profile.rst`: a new driver is
   a "feature for the next mainline release", and for those "baseline shall be
   the ``media-committers.git next`` branch". The mainline -rc baseline is only
