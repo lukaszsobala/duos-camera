@@ -7,7 +7,7 @@ Armbian's bare kernel cache, so its objects live in
 clone breaks. `git repack -a -d` inside `linux-gc2083` detaches it at the cost
 of a few GB.
 
-These are *not* the Armbian build patches. `../0058-*` and `../0059-*` are the
+These are *not* the Armbian build patches. `../0900-*` and `../0901-*` are the
 Armbian-numbered copies and are left alone.
 
 ## Checks run

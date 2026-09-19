@@ -428,9 +428,11 @@ locked PHY and garbage packets.
 
 ## Config symbols
 
-`CONFIG_VIDEO_GC2083=m` and `MEDIA_SUPPORT=m` already ship in
-`config/kernel/linux-sophgo-sg200x-{riscv64,arm64}-bleedingedge.config`, and
-`VIDEO_CAMERA_SENSOR` is `default y` so removing the `is not set` line was
-enough. `CONFIG_CMA=y` is already set too. Stage 3 will additionally need
+`CONFIG_VIDEO_GC2083=m` and `MEDIA_SUPPORT=m` already ship in all four
+`config/kernel/linux-sophgo-sg200x-{riscv64,arm64}-{edge,bleedingedge}.config`,
+and `VIDEO_CAMERA_SENSOR` is `default y` so removing the `is not set` line was
+enough. Since the branch bump, `edge` is 7.2 and `bleedingedge` is 7.3, and the
+sensor patches sit in both `patch/kernel/archive/sophgo-sg200x-{7.2,7.3}/` as
+`0900`/`0901`. `CONFIG_CMA=y` is already set too. Stage 3 will additionally need
 `VIDEOBUF2_DMA_CONTIG` and `V4L_PLATFORM_DRIVERS`, both of which come in by
 `select` once a platform driver exists in the tree.
