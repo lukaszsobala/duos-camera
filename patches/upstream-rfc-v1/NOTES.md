@@ -81,10 +81,26 @@ byte-identical and the driver differs in exactly one way:
   per the rule that bring-up scaffolding does not go upstream. If that parameter
   is ever removed from the Armbian copy, the two files become identical again.
 
-## Still to decide before sending
+## Before sending
 
-- **The base is still v7.2-rc7** while mainline has moved on. Rebase onto the
-  current -rc before posting, and re-run the three checks above.
-- **Version numbering.** These were regenerated in place as `RFC v1`. If the
-  original v1 was ever actually posted, this is a v2 and needs `-v2` plus a
-  changelog under the `---` line saying the stream-on sequence was dropped.
+- **This is a v2.** Confirmed 2026-09-20: the original RFC v1 was posted, so the
+  next posting is `--subject-prefix="RFC PATCH v2"` with a changelog under the
+  `---` line of each patch (and in the cover letter), saying the vendor's
+  resume-from-standby sequence is no longer applied on stream-on, and why.
+- **Rebase onto `media-committers.git` `next`, not onto a mainline -rc and not
+  onto linux-next.** The media subsystem states its own baseline rule in
+  `Documentation/driver-api/media/maintainer-entry-profile.rst`: a new driver is
+  a "feature for the next mainline release", and for those "baseline shall be
+  the ``media-committers.git next`` branch". The mainline -rc baseline is only
+  for bug fixes against the *current* release, which this is not. linux-next is
+  not mentioned in that profile at all — it is a daily integration tree for
+  testing, not a submission base, and basing on it would hand the maintainer a
+  series they cannot apply.
+
+      https://gitlab.freedesktop.org/linux-media/media-committers.git  (branch: next)
+
+  Note the profile warns that tree "can be rebased, although only as a last
+  resort", so re-check the base shortly before posting.
+- Re-run the three checks above after rebasing. `drivers/media/i2c/Kconfig` and
+  `Makefile` are where a conflict would show up, since other new sensor drivers
+  land in the same two lists.
