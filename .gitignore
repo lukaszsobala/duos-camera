@@ -1,0 +1,11 @@
+# Kernel module build artifacts. These were tracked until 2026-09-20 and were
+# purged from history; nothing generated belongs in here.
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+.*.cmd
+*.symvers
+modules.order
+Module.symvers
