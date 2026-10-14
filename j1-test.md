@@ -60,7 +60,8 @@ Copy `tools/j1-stream.sh` to the board. Install `v4l-utils`.
        cat /sys/kernel/debug/a0c2000.csi/status
        echo 0 > /sys/kernel/debug/a0c2000.csi/power
 
-   Expect `lane LP p/n 07/07`: lanes 0, 1 and 2 in LP-11.
+   The sensor is powered off outside a stream, so expect `00/00`. The
+   LP-11 check happens in step 4.
 
 4. **Stream.**
 
@@ -70,6 +71,9 @@ Copy `tools/j1-stream.sh` to the board. Install `v4l-utils`.
    and a `/root/cap.raw` of 8 frames.
 
 ## If step 4 fails
+
+Run `tools/j1-diag.sh` first. It samples the lanes during a stream and
+dumps the sensor registers.
 
 - No HS on any lane: check that `gc2083` has `stream_on_restart=0` (the
   default). Then sweep `hs_settle` of `cv1800_csi2` from 5 to 20.
