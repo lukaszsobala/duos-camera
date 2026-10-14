@@ -1,8 +1,14 @@
 # Milk-V Duo S camera work
 
 Working files for getting the CAM-GC2083 on the J1 connector running under
-Armbian. Kept out of the Armbian fork on purpose - nothing here is wired into
-the build.
+Armbian.
+
+**Current state (2026-10-14):** the GC2083 now runs on the SG2000 receiver and
+capture drivers from armbian/build PR #10936, which stream on J2. Our own
+receiver, `duos-csi`, is retired. Branch `milkv-duos-camera` in the build fork
+carries the PR, the GC2083 patches and a J1 overlay. Run
+[j1-test.md](j1-test.md) next. Stage 1 also had the wrong lane mapping, see
+that file.
 
 Two things live here, and they are testable independently:
 
@@ -624,6 +630,9 @@ can see the lanes - and only some registers read back at all. `MIPI_EN`
 ---
 
 # Test 4: the real receiver
+
+> **Superseded.** Use [j1-test.md](j1-test.md): the PR #10936 receiver
+> replaces `duos-csi`, and the lane mapping below is wrong.
 
 The stub's wall - no receiver, so nothing observes the lanes - is what
 `duos-csi/` starts to take down. It is the same V4L2 plumbing as the stub plus

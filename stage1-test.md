@@ -1,5 +1,8 @@
 # Stage 1 test: is the CSI-2 link actually receiving?
 
+> **Superseded on 2026-10-14.** Use [j1-test.md](j1-test.md). `duos-csi`
+> puts the clock on PHY lane 1; the board has it on lane 2.
+
 A runbook for `duos-csi.ko` + `duos-cam-csi.dtbo` on a Milk-V Duo S with the
 GC2083 on J1. Background, register map and the reasoning behind every constant
 are in [receiver-plan.md](receiver-plan.md); this file is just the procedure.

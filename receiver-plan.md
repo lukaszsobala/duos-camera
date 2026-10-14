@@ -1,5 +1,11 @@
 # The receiver: getting a frame out of the SG2000
 
+> **Superseded on 2026-10-14.** The receiver and capture drivers from
+> armbian/build PR #10936 (`cv1800-csi2`, `cv1800-vi`) do this job and stream
+> on J2. Test the GC2083 on them with [j1-test.md](j1-test.md). This file
+> stays as the record of the vendor register map. Its lane mapping is wrong:
+> see "Board wiring" below.
+
 The sensor side is done (see README.md). What is missing is everything that
 receives the two MIPI lanes. This file is the hardware map and the staged plan.
 
@@ -88,6 +94,13 @@ fractional PLLs, so the receiver driver must consume them at whatever rate it
 finds them and must never set their rate.
 
 ## Board wiring: the lane mapping
+
+> **Correction (2026-10-14).** The mapping below is the driver default, not
+> the board value. The Duo S board file
+> `device/generic/rootfs_overlay/duos/mnt/data/sensor_cfg_GC2083.ini` sets
+> `lane_id = 2, 0, 1`, and `gc2083_cmos.c` copies the ini value over the
+> default (`as16LaneId`). So J1 is **clock on PHY lane 2, data on lanes 0
+> and 1**. Stage 1 listened for the clock on a data lane.
 
 This is the part I expected to need a schematic for. It is in the SDK, in
 `cvi_mpi/component/isp/sensor/sg200x/gcore_gc2083/gc2083_cmos_param.h`:
@@ -355,9 +368,10 @@ Four hardware runs in. The receiver is configured correctly - every register
 reads back as intended - and the link does not come up. What has been ruled out,
 so none of it gets re-tried:
 
-- **The lane mapping.** At idle, exactly three pads read LP-11 and the other
-  three read nothing, and the three are the ones the vendor's `lane_id` names.
-  The ribbon and the mapping are right.
+- ~~**The lane mapping.**~~ **Wrong, see the correction under "Board
+  wiring".** The idle test showed only *which* three pads are in use, not
+  which one is the clock. The clock is on lane 2, which explains the `lp 0/0`
+  reading below.
 - **The MAC clock source.** `VIP_SYS_CLK_CTRL1` bits [5:4] already read `0x2` at
   baseline; the bootloader sets it. Writing it again changes nothing. The theory
   was wrong, and the code is kept only because "the clk framework says the clock
