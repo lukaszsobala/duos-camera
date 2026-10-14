@@ -4,13 +4,16 @@
   raw12-to-png.py cap.raw [width height bayer]   (default 1920 1080 RGGB)
 
 Writes cap-<n>.png per frame: a half-size colour image (one RGB pixel per
-2x2 Bayer cell), no white balance, gamma 2.2. Prints per-channel means, so a
-flat or corrupt frame shows without opening the PNGs.
+2x2 Bayer cell), black level removed, stretched so the 99.5th percentile is
+white, gray-world white balance, gamma 2.2. Prints per-channel means of the
+raw data, so a flat or corrupt frame shows without opening the PNGs.
 """
 import sys
 
 import numpy as np
 from PIL import Image
+
+BLACK = 64 << 2  # GC2083 black level, 10-bit 64 in the 12-bit container
 
 
 def main():
@@ -44,7 +47,11 @@ def main():
         print(f"frame {n}: mean R {means[0]:.0f} G {means[1]:.0f} "
               f"B {means[2]:.0f} (of 4095), max {px.max()}")
 
-        img = (np.clip(rgb, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
+        lin = np.clip(rgb - BLACK / 4095.0, 0, None)
+        lin *= lin.reshape(-1, 3).mean(axis=0).mean() / np.maximum(
+            lin.reshape(-1, 3).mean(axis=0), 1e-9)
+        lin /= max(np.percentile(lin, 99.5), 1e-9)
+        img = (np.clip(lin, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
         Image.fromarray(img).save(f"{path.rsplit('.', 1)[0]}-{n}.png")
 
 
