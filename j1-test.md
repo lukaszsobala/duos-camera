@@ -98,3 +98,10 @@ convert on the host with `tools/raw12-to-png.py cap.raw`.
 
 Runs 1 and 2 used a build with the old driver by mistake (a cherry-pick dropped
 the start-sequence fix): all lanes stayed in LP-11.
+
+**Run 4, 2026-10-15: a correct image.** A lit room at `GAIN=256` and
+`GAIN=1024`: sharp, colours right (green plants, brown wood), so the Bayer
+order RGGB is confirmed. At 16x gain the mean is about 30% of full scale. At
+the default 1x gain a dim scene stays at black level (run 3). The image came
+out upside down; if the module was upright, add `rotation = <180>` to the
+overlay.

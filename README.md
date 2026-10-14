@@ -6,8 +6,8 @@ Armbian.
 **Current state (2026-10-14):** the GC2083 now runs on the SG2000 receiver and
 capture drivers from armbian/build PR #10936, which stream on J2. Our own
 receiver, `duos-csi`, is retired. Branch `milkv-duos-camera` in the build fork
-carries the PR, the GC2083 patches and a J1 overlay. Run
-[j1-test.md](j1-test.md) next. Stage 1 also had the wrong lane mapping, see
+carries the PR, the GC2083 patches and a J1 overlay. It produces
+correct 1920x1080 images since 2026-10-15, see [j1-test.md](j1-test.md). Stage 1 also had the wrong lane mapping, see
 that file.
 
 Two things live here, and they are testable independently:
