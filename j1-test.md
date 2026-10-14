@@ -105,3 +105,8 @@ the start-sequence fix): all lanes stayed in LP-11.
 order RGGB is confirmed. At 16x gain the mean is about 30% of full scale. At
 the default 1x gain a dim scene stays at black level (run 3). The camera was held
 upside down for this capture, so the orientation needs no change.
+
+**Colour, 2026-10-15.** With the vendor CCM in `raw12-to-png.py` the colours
+match the scene. A purple cast on the bright wall came from the converter:
+green clips first, so clipped areas turned purple. The converter now keeps
+clipped highlights white.
