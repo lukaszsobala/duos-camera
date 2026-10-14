@@ -62,8 +62,13 @@ def main():
               f"B {means[2]:.0f} (of 4095), max {px.max()}")
 
         lin = np.clip(rgb - BLACK / 4095.0, 0, None)
-        lin *= lin.reshape(-1, 3).mean(axis=0).mean() / np.maximum(
+        gains = lin.reshape(-1, 3).mean(axis=0).mean() / np.maximum(
             lin.reshape(-1, 3).mean(axis=0), 1e-9)
+        lin *= gains
+        # A clipped channel stops rising while the others go on, which turns
+        # highlights purple. Clip all channels at the lowest clip level, so
+        # that clipped areas stay white.
+        lin = np.minimum(lin, (gains * (4095 - BLACK) / 4095.0).min())
         lin = np.clip(lin @ ccm.T, 0, None)
         lin /= max(np.percentile(lin, 99.5), 1e-9)
         img = (np.clip(lin, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
