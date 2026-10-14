@@ -3,39 +3,20 @@ From: Lukasz Sobala <lsobala1@gmail.com>
 Date: Wed, 12 Aug 2026 01:45:39 +0200
 Subject: [PATCH] media: i2c: add GalaxyCore GC2083 sensor driver
 
-The GC2083 is a 1920x1080 10-bit Bayer sensor with a two-lane MIPI CSI-2
-output, sold by Milk-V as the CAM-GC2083 module for the Duo and Duo S.
+Add a V4L2 driver for the GalaxyCore GC2083, a 1920x1080 RAW10 sensor
+with a two-lane MIPI CSI-2 output. Milk-V sells it as the CAM-GC2083
+module for the Duo and Duo S.
 
-There is no public datasheet. The register sequences come from
-GalaxyCore's reference settings as carried in Sophgo's
-duo-buildroot-sdk-v2, where the sensor is driven from userspace by the
-CVI MPI stack; the mode table is reproduced verbatim and the registers
-whose function is known - exposure, gain, frame length, mirror and flip -
-are driven from V4L2 controls instead.
-
-Analogue gain is a ladder of 29 steps roughly 1.2x apart, selected by
-writing thirteen registers with no arithmetic relationship to the
-resulting gain. Rather than expose those steps directly, the driver
-takes a continuous V4L2_CID_ANALOGUE_GAIN over the whole 1x to 148x
-range, picks the step at or below what was asked for, and makes up the
-remainder in digital fine gain - which is what the vendor's own AE loop
-does with the same table.
-
-Every timing in the mode table is derived from a 24MHz MCLK and none of
-them are recalculated, so a board whose clock tree cannot produce exactly
-24MHz gets a frame rate and a link frequency that are wrong in the same
-proportion. Probe warns about that rather than refusing to bind; the
-board this was developed on lands on 23.76MHz and works.
-
-Supported: 1920x1080 at 30fps, RAW10, two lanes.
+The register sequences come from Sophgo's duo-buildroot-sdk-v2.
+Supported: 1920x1080 at 30 fps.
 
 Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
 ---
  MAINTAINERS                |    8 +
  drivers/media/i2c/Kconfig  |   10 +
  drivers/media/i2c/Makefile |    1 +
- drivers/media/i2c/gc2083.c | 1200 ++++++++++++++++++++++++++++++++++++
- 4 files changed, 1219 insertions(+)
+ drivers/media/i2c/gc2083.c | 1205 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 1224 insertions(+)
  create mode 100644 drivers/media/i2c/gc2083.c
 
 diff --git a/MAINTAINERS b/MAINTAINERS
@@ -92,10 +73,10 @@ index e45359efe0e4..9b9a0b641371 100644
  obj-$(CONFIG_VIDEO_HI846) += hi846.o
 diff --git a/drivers/media/i2c/gc2083.c b/drivers/media/i2c/gc2083.c
 new file mode 100644
-index 000000000000..91efc694bf53
+index 000000000000..58915108b958
 --- /dev/null
 +++ b/drivers/media/i2c/gc2083.c
-@@ -0,0 +1,1200 @@
+@@ -0,0 +1,1205 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Driver for the GalaxyCore GC2083 image sensor
@@ -892,23 +873,28 @@ index 000000000000..91efc694bf53
 +		goto err_rpm_put;
 +	}
 +
-+	/* The vendor lets the sensor settle this long before enabling MIPI. */
++	/*
++	 * The vendor's own settle delay, at the end of
++	 * gc2083_linear_1080p30_init() and after its equivalent of the control
++	 * sync above.
++	 */
 +	fsleep(GC2083_INIT_SETTLE_US);
 +
 +	/*
-+	 * Stream on. Verbatim from the vendor's gc2083_restart(): the PLL is
-+	 * retimed before the MIPI transmitter is enabled, and the 1us gap
-+	 * after the 0x03f9 write is the vendor's, not a guess.
++	 * That is the whole start sequence. The mode table ends by configuring
++	 * the MIPI block (0x023e), and in the vendor SDK writing the table *is*
++	 * starting the stream: gc2083_init() calls gc2083_linear_1080p30_init()
++	 * and nothing else.
++	 *
++	 * In particular the vendor's gc2083_restart() is not part of it.
++	 * cvi_sns_ctrl.h documents pfnRestart as "restart sensor from standby
++	 * mode", and the middleware only calls it out of
++	 * SAMPLE_COMM_VI_ResumeSensor(), paired with pfnStandby - it is a resume
++	 * path, not a start path. Its register values contradict the mode
++	 * table's: 0x03f7 0x11 against the table's 0x01, and 0x03f9 0x42 against
++	 * the table's 0x43. Applying it on a cold start leaves the sensor in
++	 * LP-11 idle, never transmitting.
 +	 */
-+	cci_write(gc2083->regmap, GC2083_REG_PLL_MODE, 0x42, &ret);
-+	if (ret)
-+		goto err_rpm_put;
-+	fsleep(1);
-+	cci_write(gc2083->regmap, GC2083_REG_PLL_CTRL, 0x11, &ret);
-+	cci_write(gc2083->regmap, GC2083_REG_PWR_CTRL, 0x8e, &ret);
-+	cci_write(gc2083->regmap, GC2083_REG_MIPI_EN, 0x91, &ret);
-+	if (ret)
-+		goto err_rpm_put;
 +
 +	return 0;
 +

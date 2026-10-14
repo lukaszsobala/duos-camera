@@ -21,9 +21,9 @@ are data lanes.
 
 ## Build
 
-Branch `milkv-duos-camera` in the build fork. It has the PR #10936 commits,
-then the GC2083 patches (0900/0901) and the J1 overlay (0902 riscv, 0903
-arm64).
+Branch `duos-camera-j1` in the build fork, on top of the PR #10936 branch.
+The camera patches are one block: theirs 0900-0909, then the GC2083 binding
+and driver (0910/0911) and the J1 overlay (0912 riscv, 0913 arm64).
 
     ./compile.sh kernel BOARD=milkv-duos-riscv BRANCH=edge
 
@@ -75,8 +75,9 @@ Copy `tools/j1-stream.sh` to the board. Install `v4l-utils`.
 Run `tools/j1-diag.sh` first. It samples the lanes during a stream and
 dumps the sensor registers.
 
-- No HS on any lane: check that `gc2083` has `stream_on_restart=0` (the
-  default). Then sweep `hs_settle` of `cv1800_csi2` from 5 to 20.
+- No HS on any lane: check the sensor registers `0x03f7=0x01` and
+  `0x03f9=0x43` (the mode table). Then sweep `hs_settle` of `cv1800_csi2`
+  from 5 to 20.
 - ECC or CRC errors, wrong data type: swap the data lanes in the overlay
   (`data-lanes = <1 0>`), then try P/N swap with `lane-polarities`.
 - Frames of the wrong size: the VI resets itself and continues. Check the

@@ -3,13 +3,10 @@ From: Lukasz Sobala <lsobala1@gmail.com>
 Date: Wed, 12 Aug 2026 01:45:39 +0200
 Subject: [PATCH] dt-bindings: media: i2c: add GalaxyCore GC2083
 
-The GC2083 is a 1920x1080 raw Bayer sensor with a two-lane MIPI CSI-2
-output and an I2C control bus. It is the sensor on Milk-V's CAM-GC2083
-module, which is the camera sold for the Milk-V Duo and Duo S.
-
-The supplies and the reset GPIO are optional: on modules like Milk-V's
-the rails are fixed on the module itself and only RESETB is brought out
-to the connector, so a board may have nothing to describe.
+Add the binding for the GalaxyCore GC2083, a 1920x1080 RAW10 sensor with
+a two-lane MIPI CSI-2 output. The supplies and the reset GPIO are
+optional: the Milk-V CAM-GC2083 module has fixed rails and brings out
+only the reset line.
 
 Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
 ---

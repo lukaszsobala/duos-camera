@@ -447,6 +447,6 @@ locked PHY and garbage packets.
 and `VIDEO_CAMERA_SENSOR` is `default y` so removing the `is not set` line was
 enough. Since the branch bump, `edge` is 7.2 and `bleedingedge` is 7.3, and the
 sensor patches sit in both `patch/kernel/archive/sophgo-sg200x-{7.2,7.3}/` as
-`0900`/`0901`. `CONFIG_CMA=y` is already set too. Stage 3 will additionally need
+`0910`/`0911`. `CONFIG_CMA=y` is already set too. Stage 3 will additionally need
 `VIDEOBUF2_DMA_CONTIG` and `V4L_PLATFORM_DRIVERS`, both of which come in by
 `select` once a platform driver exists in the tree.

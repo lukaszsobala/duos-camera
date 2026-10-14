@@ -7,7 +7,7 @@ Armbian's bare kernel cache, so its objects live in
 clone breaks. `git repack -a -d` inside `linux-gc2083` detaches it at the cost
 of a few GB.
 
-These are *not* the Armbian build patches. `../0900-*` and `../0901-*` are the
+These are *not* the Armbian build patches. `../0910-*` and `../0911-*` are the
 Armbian-numbered copies and are left alone.
 
 ## Checks run
@@ -72,14 +72,10 @@ and re-apply the cover letter text.
 The three differences this section used to list — the non-legacy
 `devm_v4l2_sensor_clk_get()`, the `clk_get_rate()` warning in probe, and the
 binding wording about 24MHz — were all folded back into the Armbian copies by
-the refresh, so the two have converged. As of 2026-09-20 the binding is
-byte-identical and the driver differs in exactly one way:
-
-- The Armbian copy keeps the old resume-from-standby sequence behind a
-  `stream_on_restart` module parameter, defaulting off, so both behaviours can
-  be compared on hardware without a rebuild. **This series does not have it**,
-  per the rule that bring-up scaffolding does not go upstream. If that parameter
-  is ever removed from the Armbian copy, the two files become identical again.
+the refresh, so the two have converged. Since 2026-10-15 the Armbian copy has
+no `stream_on_restart` parameter either, so the binding and the driver are
+byte-identical to this series. Only the commit messages differ: the Armbian
+copies carry short ones.
 
 ## Baseline while the work continues
 
