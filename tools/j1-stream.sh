@@ -2,6 +2,8 @@
 # Capture raw frames from the GC2083 on J1 (run on the board).
 #   [GAIN=n] [OUT=file] j1-stream.sh [bridge test pattern 0-4] [frames]
 # GAIN is the sensor analogue_gain control: 64 = 1x (the default), 1024 = 16x.
+# frames = 0 streams until Ctrl-C and writes no file unless OUT is set: use
+# it to watch the CPU load in top while the camera runs.
 # Pattern 0 = the sensor. 1-4 = the VI bridge's own generator, which
 # starts neither the receiver nor the sensor. Frames land in /root/cap.raw
 # (packed RAW12, back to back), or OUT. Adapted from tools/stream.sh in
@@ -11,7 +13,6 @@ H=1080
 TP=${1:-0}
 N=${2:-8}
 M="media-ctl -d ${MEDIA:-/dev/media0}"
-OUT=${OUT:-/root/cap.raw}
 
 SNAME=$($M -p | sed -n 's/.*entity [0-9]*: \(gc2083 [0-9]*-0037\).*/\1/p' | head -1)
 [ -n "$SNAME" ] || { echo "no gc2083 entity in $M -p"; exit 1; }
@@ -30,6 +31,12 @@ esac
 v4l2-ctl -d "$BRIDGE" -c test_pattern="$TP"
 v4l2-ctl -d "$VIDEO" --set-fmt-video width=$W,height=$H,pixelformat=$PIX || exit 1
 echo "$SNAME $CODE ${W}x${H} -> $PIX, bridge pattern $TP"
+
+if [ "$N" = 0 ]; then
+	echo "streaming until Ctrl-C; v4l2-ctl prints the frame rate"
+	exec v4l2-ctl -d "$VIDEO" --stream-mmap=4 ${OUT:+--stream-to="$OUT"}
+fi
+OUT=${OUT:-/root/cap.raw}
 
 timeout 20 v4l2-ctl -d "$VIDEO" --stream-mmap=4 --stream-skip=3 \
 	--stream-count="$N" --stream-to="$OUT" --verbose &

@@ -41,6 +41,16 @@ The conversion is simple: half resolution, gray-world white balance, no lens
 shading correction, gamma 2.2. It shows whether the camera works, not the best
 possible image.
 
+## Watch the CPU load while streaming (on the board)
+
+Stream without saving, until Ctrl-C:
+
+    GAIN=256 ./j1-stream.sh 0 0
+
+v4l2-ctl prints the frame rate. In a second `screen` window, run `top -d 1`.
+The frames go to memory by DMA, so the CPU load should stay low. To count the
+frame interrupts, compare `grep -e csi -e video-input /proc/interrupts` twice.
+
 ## Other tools
 
 - `j1-diag.sh` (board): samples the CSI-2 lane state during a stream and dumps
