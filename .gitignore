@@ -9,3 +9,4 @@
 *.symvers
 modules.order
 Module.symvers
+__pycache__/

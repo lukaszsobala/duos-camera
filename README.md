@@ -19,9 +19,8 @@ Two things live here, and they are testable independently:
    V4L2 sensor driver. Needs a kernel rebuild, and can only be partly tested
    until there is a CSI-2 receiver driver for the SG2000.
 
-`tools/` holds one thing the probe wants and the image may not have: a 40-line
-`/dev/mem` peek/poke, for boards whose busybox was built without the `devmem`
-applet.
+`tools/` holds the capture script and the converter that turns captured frames
+into PNG images. **To take a picture, see [tools/README.md](tools/README.md).**
 
 `led/` is unrelated to the camera - it turns the blue user LED off. It is here
 only because this is where Duo S odds and ends that are not in the build live.
