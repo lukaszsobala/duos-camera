@@ -102,6 +102,5 @@ the start-sequence fix): all lanes stayed in LP-11.
 **Run 4, 2026-10-15: a correct image.** A lit room at `GAIN=256` and
 `GAIN=1024`: sharp, colours right (green plants, brown wood), so the Bayer
 order RGGB is confirmed. At 16x gain the mean is about 30% of full scale. At
-the default 1x gain a dim scene stays at black level (run 3). The image came
-out upside down; if the module was upright, add `rotation = <180>` to the
-overlay.
+the default 1x gain a dim scene stays at black level (run 3). The camera was held
+upside down for this capture, so the orientation needs no change.
