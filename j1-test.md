@@ -85,3 +85,16 @@ dumps the sensor registers.
 ## Report back
 
 The output of steps 1-4, both debugfs `status` files, and `dmesg`.
+
+## Results
+
+**Run 3, 2026-10-15, riscv64 edge 7.2.10: frames.** 8 frames of 1920x1080 at
+29.71 fps (30 x 23.76/24, the MCLK ratio). The lanes alternate between all-HS
+and data-lanes-LP-11 with the clock in HS: a continuous clock. Sensor PLL
+registers hold the mode table values; `0x023e` reads back `0x99`. One ECC
+error; the status snapshot showed data type `0x08`, not `0x2b`. Frames drop
+after the first 7, likely the SD card at 90 MB/s. Image content not yet checked:
+convert on the host with `tools/raw12-to-png.py cap.raw`.
+
+Runs 1 and 2 used a build with the old driver by mistake (a cherry-pick dropped
+the start-sequence fix): all lanes stayed in LP-11.
