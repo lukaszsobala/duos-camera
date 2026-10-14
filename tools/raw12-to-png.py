@@ -62,8 +62,10 @@ def main():
               f"B {means[2]:.0f} (of 4095), max {px.max()}")
 
         lin = np.clip(rgb - BLACK / 4095.0, 0, None)
-        gains = lin.reshape(-1, 3).mean(axis=0).mean() / np.maximum(
-            lin.reshape(-1, 3).mean(axis=0), 1e-9)
+        # Gray world, over the cells with no clipped channel
+        ok = (rgb < 4000 / 4095.0).all(axis=-1)
+        means = (lin[ok] if ok.any() else lin.reshape(-1, 3)).mean(axis=0)
+        gains = means.mean() / np.maximum(means, 1e-9)
         lin *= gains
         # A clipped channel stops rising while the others go on, which turns
         # highlights purple. Clip all channels at the lowest clip level, so
