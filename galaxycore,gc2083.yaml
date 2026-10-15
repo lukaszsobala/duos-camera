@@ -24,9 +24,8 @@ properties:
   clocks:
     maxItems: 1
     description:
-      Input clock (MCLK). The sensor's published timings, and the driver's,
-      assume 24MHz; the sensor itself will run at other rates, with everything
-      derived from MCLK scaling accordingly.
+      Input clock (MCLK). The sensor's timings scale with it. 24MHz gives
+      500Mbit/s per lane and 30fps.
 
   avdd-supply:
     description: Analogue power supply, 2.8V.
@@ -74,7 +73,10 @@ required:
   - clocks
   - port
 
-additionalProperties: false
+allOf:
+  - $ref: /schemas/media/video-interface-devices.yaml#
+
+unevaluatedProperties: false
 
 examples:
   # The camera on the J1 connector of a Milk-V Duo S: i2c3, MCLK from the
@@ -87,7 +89,7 @@ examples:
         #address-cells = <1>;
         #size-cells = <0>;
 
-        sensor@37 {
+        camera@37 {
             compatible = "galaxycore,gc2083";
             reg = <0x37>;
 
@@ -100,7 +102,7 @@ examples:
             port {
                 gc2083_out: endpoint {
                     data-lanes = <1 2>;
-                    link-frequencies = /bits/ 64 <185625000>;
+                    link-frequencies = /bits/ 64 <250000000>;
                     remote-endpoint = <&csi0_in>;
                 };
             };

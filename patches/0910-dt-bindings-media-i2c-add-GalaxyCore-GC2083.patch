@@ -10,16 +10,16 @@ only the reset line.
 
 Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
 ---
- .../bindings/media/i2c/galaxycore,gc2083.yaml | 110 ++++++++++++++++++
- 1 file changed, 110 insertions(+)
+ .../bindings/media/i2c/galaxycore,gc2083.yaml | 112 ++++++++++++++++++
+ 1 file changed, 112 insertions(+)
  create mode 100644 Documentation/devicetree/bindings/media/i2c/galaxycore,gc2083.yaml
 
 diff --git a/Documentation/devicetree/bindings/media/i2c/galaxycore,gc2083.yaml b/Documentation/devicetree/bindings/media/i2c/galaxycore,gc2083.yaml
 new file mode 100644
-index 000000000000..973e0ca767c0
+index 000000000000..4dcb16f1b159
 --- /dev/null
 +++ b/Documentation/devicetree/bindings/media/i2c/galaxycore,gc2083.yaml
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,112 @@
 +# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
 +%YAML 1.2
 +---
@@ -46,9 +46,8 @@ index 000000000000..973e0ca767c0
 +  clocks:
 +    maxItems: 1
 +    description:
-+      Input clock (MCLK). The sensor's published timings, and the driver's,
-+      assume 24MHz; the sensor itself will run at other rates, with everything
-+      derived from MCLK scaling accordingly.
++      Input clock (MCLK). The sensor's timings scale with it. 24MHz gives
++      500Mbit/s per lane and 30fps.
 +
 +  avdd-supply:
 +    description: Analogue power supply, 2.8V.
@@ -96,7 +95,10 @@ index 000000000000..973e0ca767c0
 +  - clocks
 +  - port
 +
-+additionalProperties: false
++allOf:
++  - $ref: /schemas/media/video-interface-devices.yaml#
++
++unevaluatedProperties: false
 +
 +examples:
 +  # The camera on the J1 connector of a Milk-V Duo S: i2c3, MCLK from the
@@ -109,7 +111,7 @@ index 000000000000..973e0ca767c0
 +        #address-cells = <1>;
 +        #size-cells = <0>;
 +
-+        sensor@37 {
++        camera@37 {
 +            compatible = "galaxycore,gc2083";
 +            reg = <0x37>;
 +
@@ -122,7 +124,7 @@ index 000000000000..973e0ca767c0
 +            port {
 +                gc2083_out: endpoint {
 +                    data-lanes = <1 2>;
-+                    link-frequencies = /bits/ 64 <185625000>;
++                    link-frequencies = /bits/ 64 <250000000>;
 +                    remote-endpoint = <&csi0_in>;
 +                };
 +            };

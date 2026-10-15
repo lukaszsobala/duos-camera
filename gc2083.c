@@ -10,6 +10,9 @@
  * from userspace by the CVI MPI stack rather than by a kernel driver. There is
  * no public GC2083 datasheet, so the meaning of most registers in
  * gc2083_1080p_regs[] is not known and the sequence is reproduced verbatim.
+ * Ingenic's GPL-2.0+ gc2083.c carries the same table for a 27MHz input, apart
+ * from the PLL, frame timing and analogue settings, and documents the PLL
+ * rates used below.
  * Where a register's purpose *is* known - exposure, gain, frame length, flips -
  * it is named and driven from V4L2 controls instead.
  */
@@ -29,7 +32,6 @@
 #include <linux/property.h>
 #include <linux/regulator/consumer.h>
 #include <linux/types.h>
-#include <linux/units.h>
 
 #include <media/v4l2-cci.h>
 #include <media/v4l2-ctrls.h>
@@ -83,7 +85,12 @@
 #define GC2083_FLIP_H			BIT(0)
 #define GC2083_FLIP_V			BIT(1)
 
-/* Registers touched by the stream on/off sequences. */
+/* MIPI output on/off, the last step of stream on and the first of stream off */
+#define GC2083_REG_STREAM		CCI_REG8(0x023e)
+#define GC2083_STREAM_ON		0x99
+#define GC2083_STREAM_OFF		0x00
+
+/* Registers touched by the vendor's standby sequence. */
 #define GC2083_REG_MIPI_EN		CCI_REG8(0x003e)
 #define GC2083_REG_PLL_CTRL		CCI_REG8(0x03f7)
 #define GC2083_REG_PLL_MODE		CCI_REG8(0x03f9)
@@ -92,15 +99,27 @@
 #define GC2083_NATIVE_WIDTH		1920
 #define GC2083_NATIVE_HEIGHT		1080
 
-#define GC2083_XCLK_FREQ		(24 * HZ_PER_MHZ)
 #define GC2083_DATA_LANES		2
 #define GC2083_RGB_DEPTH		10
 
 /*
- * 1920 * 1125 lines of 2200 pixels at 30fps is a 74.25MHz pixel rate, which
- * over two lanes of RAW10 is 371.25Mbit/s per lane, so 185.625MHz of DDR clock.
+ * The PLL multiplies the input clock by 50 (0x03f8 = 0x32): 1200MHz from
+ * 24MHz. The MIPI lanes run at 5/12 of that, 500Mbit/s each, so a 250MHz DDR
+ * link clock, and the pixel clock is 100MHz. A line is 2 * 0x05c9 = 2962
+ * pixel clocks, so 1125 lines make 30fps. The Milk-V Duo S can only produce
+ * 23.76MHz, which gives a 1188MHz PLL, 495Mbit/s per lane and 29.7fps: the
+ * rates that Ingenic's driver documents for its 27MHz table with a multiplier
+ * of 44. The two arrays below are indexed together.
  */
-#define GC2083_LINK_FREQ		185625000ULL
+static const unsigned long gc2083_xclk_freqs[] = {
+	23760000,
+	24000000,
+};
+
+static const s64 gc2083_link_freq_menu[] = {
+	247500000,
+	250000000,
+};
 
 #define GC2083_SLEEP_US			(2 * USEC_PER_MSEC)
 /* The vendor waits this long after the init table before doing anything else. */
@@ -112,14 +131,12 @@ static const char * const gc2083_supply_names[] = {
 	"dovdd",	/* digital I/O */
 };
 
-static const s64 gc2083_link_freq_menu[] = {
-	GC2083_LINK_FREQ,
-};
-
 /*
  * 1920x1080 30fps, 10-bit, 2 lanes. Verbatim from the vendor's
  * gc2083_linear_1080p30_init(), minus the exposure, gain and frame-length
- * writes at the end of it, which V4L2 controls own instead.
+ * writes at the end of it, which V4L2 controls own instead, and minus its
+ * last write, 0x023e = 0x99, which turns the MIPI output on:
+ * gc2083_start_streaming() writes that after the controls.
  *
  * The first four writes are the documented soft reset: 0x03fe is poked with
  * 0xf0 three times and then cleared.
@@ -257,7 +274,6 @@ static const struct cci_reg_sequence gc2083_1080p_regs[] = {
 	{ CCI_REG8(0x0215), 0x12 },
 	{ CCI_REG8(0x0229), 0x05 },
 	{ CCI_REG8(0x0237), 0x03 },
-	{ CCI_REG8(0x023e), 0x99 },
 };
 
 /*
@@ -340,7 +356,7 @@ static const struct gc2083_mode gc2083_modes[] = {
 	{
 		.width = GC2083_NATIVE_WIDTH,
 		.height = GC2083_NATIVE_HEIGHT,
-		.hts = 2200,
+		.hts = 2962,
 		.vts_def = 1125,
 		.vts_min = 1125,
 		.regs = gc2083_1080p_regs,
@@ -383,6 +399,7 @@ struct gc2083 {
 
 	const struct gc2083_mode *cur_mode;
 	unsigned long link_freq_bitmap;
+	unsigned int link_freq_index;
 	bool identified;
 };
 
@@ -579,8 +596,8 @@ static int gc2083_set_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_VFLIP:
 		/*
 		 * Both flips move the Bayer phase, so the media code changes.
-		 * The flips are V4L2_CTRL_FLAG_MODIFY_LAYOUT and so cannot move
-		 * while streaming; updating the active format here keeps
+		 * The flips are grabbed while streaming, so this runs only
+		 * while stopped; updating the active format here keeps
 		 * get_fmt() in step with them without a set_fmt() round trip.
 		 */
 		format->code = gc2083_get_mbus_code(gc2083);
@@ -617,7 +634,7 @@ static int gc2083_set_ctrl(struct v4l2_ctrl *ctrl)
 		break;
 	}
 
-	pm_runtime_put(gc2083->dev);
+	pm_runtime_put_autosuspend(gc2083->dev);
 
 	return ret;
 }
@@ -802,10 +819,20 @@ static int gc2083_start_streaming(struct gc2083 *gc2083)
 	fsleep(GC2083_INIT_SETTLE_US);
 
 	/*
-	 * That is the whole start sequence. The mode table ends by configuring
-	 * the MIPI block (0x023e), and in the vendor SDK writing the table *is*
-	 * starting the stream: gc2083_init() calls gc2083_linear_1080p30_init()
-	 * and nothing else.
+	 * Turn the MIPI output on only now, so that the first frame already has
+	 * the exposure, gain and flips set above.
+	 */
+	cci_write(gc2083->regmap, GC2083_REG_STREAM, GC2083_STREAM_ON, &ret);
+	if (ret)
+		goto err_rpm_put;
+
+	/* The flips change the Bayer order, so they must not move now. */
+	__v4l2_ctrl_grab(gc2083->hflip, true);
+	__v4l2_ctrl_grab(gc2083->vflip, true);
+
+	/*
+	 * That is the whole start sequence: in the vendor SDK gc2083_init()
+	 * calls gc2083_linear_1080p30_init() and nothing else.
 	 *
 	 * In particular the vendor's gc2083_restart() is not part of it.
 	 * cvi_sns_ctrl.h documents pfnRestart as "restart sensor from standby
@@ -820,7 +847,7 @@ static int gc2083_start_streaming(struct gc2083 *gc2083)
 	return 0;
 
 err_rpm_put:
-	pm_runtime_put(gc2083->dev);
+	pm_runtime_put_autosuspend(gc2083->dev);
 
 	return ret;
 }
@@ -829,12 +856,16 @@ static int gc2083_stop_streaming(struct gc2083 *gc2083)
 {
 	int ret = 0;
 
+	__v4l2_ctrl_grab(gc2083->hflip, false);
+	__v4l2_ctrl_grab(gc2083->vflip, false);
+
 	/*
-	 * Verbatim from the vendor's gc2083_standby(). cci_write() short-circuits
-	 * once @ret is set, so the first failure stops the sequence rather than
-	 * hammering a bus that is not answering; the sensor is powered down by
-	 * runtime PM below in any case.
+	 * MIPI output off first, then the vendor's gc2083_standby().
+	 * cci_write() short-circuits once @ret is set, so the first failure
+	 * stops the sequence rather than hammering a bus that is not answering;
+	 * the sensor is powered down by runtime PM below in any case.
 	 */
+	cci_write(gc2083->regmap, GC2083_REG_STREAM, GC2083_STREAM_OFF, &ret);
 	cci_write(gc2083->regmap, GC2083_REG_MIPI_EN, 0x00, &ret);
 	cci_write(gc2083->regmap, GC2083_REG_PLL_CTRL, 0x00, &ret);
 	cci_write(gc2083->regmap, GC2083_REG_PWR_CTRL, 0x01, &ret);
@@ -842,7 +873,7 @@ static int gc2083_stop_streaming(struct gc2083 *gc2083)
 	if (ret)
 		dev_err(gc2083->dev, "failed to stop streaming: %d\n", ret);
 
-	pm_runtime_put(gc2083->dev);
+	pm_runtime_put_autosuspend(gc2083->dev);
 
 	return ret;
 }
@@ -962,7 +993,7 @@ static int gc2083_init_controls(struct gc2083 *gc2083)
 					  V4L2_CID_HFLIP, 0, 1, 1, 0);
 	gc2083->vflip = v4l2_ctrl_new_std(hdl, &gc2083_ctrl_ops,
 					  V4L2_CID_VFLIP, 0, 1, 1, 0);
-	/* Both change the Bayer order, so they may not move while streaming. */
+	/* Both change the Bayer order: gc2083_start_streaming() grabs them. */
 	if (gc2083->hflip)
 		gc2083->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
 	if (gc2083->vflip)
@@ -973,16 +1004,16 @@ static int gc2083_init_controls(struct gc2083 *gc2083)
 		v4l2_ctrl_new_int_menu(hdl, &gc2083_ctrl_ops,
 				       V4L2_CID_LINK_FREQ,
 				       ARRAY_SIZE(gc2083_link_freq_menu) - 1,
-				       __ffs(gc2083->link_freq_bitmap),
+				       gc2083->link_freq_index,
 				       gc2083_link_freq_menu);
 	if (gc2083->link_freq)
 		gc2083->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
 	gc2083->pixel_rate =
 		v4l2_ctrl_new_std(hdl, &gc2083_ctrl_ops, V4L2_CID_PIXEL_RATE,
-				  gc2083_to_pixel_rate(0),
-				  gc2083_to_pixel_rate(0), 1,
-				  gc2083_to_pixel_rate(0));
+				  gc2083_to_pixel_rate(gc2083->link_freq_index),
+				  gc2083_to_pixel_rate(gc2083->link_freq_index), 1,
+				  gc2083_to_pixel_rate(gc2083->link_freq_index));
 	if (gc2083->pixel_rate)
 		gc2083->pixel_rate->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
@@ -1039,6 +1070,7 @@ static int gc2083_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	struct gc2083 *gc2083;
 	unsigned long rate;
+	unsigned int i;
 	int ret;
 
 	gc2083 = devm_kzalloc(dev, sizeof(*gc2083), GFP_KERNEL);
@@ -1061,18 +1093,19 @@ static int gc2083_probe(struct i2c_client *client)
 		return dev_err_probe(dev, PTR_ERR(gc2083->xclk),
 				     "failed to get xclk\n");
 
-	/*
-	 * Every timing in the mode table is derived from a 24MHz input, and
-	 * nothing here recalculates them, so a board that cannot produce
-	 * exactly 24MHz still works but reports frame rates and a link
-	 * frequency that are wrong in the same proportion. Say so rather than
-	 * fail: the error is small on the boards seen so far, and refusing to
-	 * probe would help nobody.
-	 */
+	/* The link frequency follows the input clock, see gc2083_xclk_freqs[] */
 	rate = clk_get_rate(gc2083->xclk);
-	if (rate != GC2083_XCLK_FREQ)
-		dev_warn(dev, "xclk is %lu Hz, not %lu Hz; timings will be off by the same ratio\n",
-			 rate, (unsigned long)GC2083_XCLK_FREQ);
+	for (i = 0; i < ARRAY_SIZE(gc2083_xclk_freqs); i++)
+		if (rate == gc2083_xclk_freqs[i])
+			break;
+	if (i == ARRAY_SIZE(gc2083_xclk_freqs))
+		return dev_err_probe(dev, -EINVAL, "unsupported xclk rate %lu Hz\n",
+				     rate);
+	if (!(gc2083->link_freq_bitmap & BIT(i)))
+		return dev_err_probe(dev, -EINVAL,
+				     "link-frequencies does not list %lld Hz for a %lu Hz xclk\n",
+				     gc2083_link_freq_menu[i], rate);
+	gc2083->link_freq_index = i;
 
 	ret = gc2083_get_regulators(gc2083);
 	if (ret)
@@ -1146,6 +1179,7 @@ static int gc2083_probe(struct i2c_client *client)
 	return 0;
 
 err_rpm_disable:
+	pm_runtime_dont_use_autosuspend(dev);
 	pm_runtime_disable(dev);
 	pm_runtime_set_suspended(dev);
 
@@ -1174,6 +1208,7 @@ static void gc2083_remove(struct i2c_client *client)
 	media_entity_cleanup(&sd->entity);
 	v4l2_ctrl_handler_free(&gc2083->ctrls);
 
+	pm_runtime_dont_use_autosuspend(gc2083->dev);
 	pm_runtime_disable(gc2083->dev);
 	if (!pm_runtime_status_suspended(gc2083->dev))
 		gc2083_power_off(gc2083->dev);

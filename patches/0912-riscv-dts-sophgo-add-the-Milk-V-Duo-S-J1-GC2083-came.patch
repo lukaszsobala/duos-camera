@@ -9,8 +9,8 @@ the SG2000 CSI-2 receiver and VI capture drivers. Enable it with
 overlays=camera-j1-gc2083. Do not combine it with a J2 camera overlay.
 ---
  arch/riscv/boot/dts/sophgo/Makefile           |   5 +
- .../overlay/sg2000-camera-j1-gc2083.dtso      | 126 ++++++++++++++++++
- 2 files changed, 131 insertions(+)
+ .../overlay/sg2000-camera-j1-gc2083.dtso      | 125 ++++++++++++++++++
+ 2 files changed, 130 insertions(+)
  create mode 100644 arch/riscv/boot/dts/sophgo/overlay/sg2000-camera-j1-gc2083.dtso
 
 diff --git a/arch/riscv/boot/dts/sophgo/Makefile b/arch/riscv/boot/dts/sophgo/Makefile
@@ -28,10 +28,10 @@ index cde9dfc..7bdd5c6 100644
 +dtb-$(CONFIG_ARCH_SOPHGO) += overlay/sg2000-camera-j1-gc2083.dtbo
 diff --git a/arch/riscv/boot/dts/sophgo/overlay/sg2000-camera-j1-gc2083.dtso b/arch/riscv/boot/dts/sophgo/overlay/sg2000-camera-j1-gc2083.dtso
 new file mode 100644
-index 0000000..5317a72
+index 0000000..6e18c9e
 --- /dev/null
 +++ b/arch/riscv/boot/dts/sophgo/overlay/sg2000-camera-j1-gc2083.dtso
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,125 @@
 +// SPDX-License-Identifier: (GPL-2.0 OR MIT)
 +/*
 + * Milk-V CAM-GC2083 (GalaxyCore GC2083) on the Milk-V Duo S J1 connector.
@@ -42,7 +42,7 @@ index 0000000..5317a72
 + * J1 wiring, from the vendor's sensor_cfg_GC2083.ini for this board:
 + *
 + *   I2C3, sensor at 0x37
-+ *   CAM_MCLK0 (CLK_CAM0), 24 MHz requested
++ *   CAM_MCLK0 (CLK_CAM0), 24 MHz requested, 23.76 MHz delivered
 + *   CAM_RST0 = GPIOA2, active low
 + *   MIPI RX lane 2 clock, lanes 0/1 data (lane_id = 2, 0, 1)
 + *
@@ -69,7 +69,6 @@ index 0000000..5317a72
 +&i2c3 {
 +	#address-cells = <1>;
 +	#size-cells = <0>;
-+	status = "okay";
 +
 +	camera@37 {
 +		compatible = "galaxycore,gc2083";
@@ -84,7 +83,7 @@ index 0000000..5317a72
 +			sensor_out: endpoint {
 +				remote-endpoint = <&csi2_in>;
 +				data-lanes = <1 2>;
-+				link-frequencies = /bits/ 64 <185625000>;
++				link-frequencies = /bits/ 64 <247500000>;
 +			};
 +		};
 +	};
