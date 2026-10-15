@@ -110,3 +110,9 @@ upside down for this capture, so the orientation needs no change.
 match the scene. A purple cast on the bright wall came from the converter:
 green clips first, so clipped areas turned purple. The converter now keeps
 clipped highlights white.
+
+**Run 5, 2026-10-16: the reworked driver.** Branch `duos-camera-j1` at
+`19e90bf8`, riscv64 edge 7.2. This driver selects 247.5 MHz from the 23.76 MHz
+MCLK and writes `0x023e` after the controls. Result: 29.7 fps, 4 clean frames,
+a correct image. A flip change returns EBUSY while streaming and succeeds after
+the stream stops.
