@@ -155,4 +155,6 @@ skips to the next IDR picture. No authentication.
   `i2c-tools`.
 - `phy-dump.sh` and `devmem.c` (board): dump the receiver registers through
   `/dev/mem`. From the stage 1 work.
+- `w4-gdi-dump.sh` (board): dumps the memory interface (GDI) registers of the
+  H.265 encoder after a hang. Needs `devmem`.
 - `stage1-sweep.sh`: for the retired `duos-csi` receiver only.
