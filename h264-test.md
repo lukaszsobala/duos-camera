@@ -150,3 +150,14 @@ probes and registers `coda-jpeg-encoder` (`no iram` is expected).
 firmware word 0xcc283001, so firmware product 0xcc28, version 3.0.1. The
 driver can use 0xcc28 as the `CODA_980` product code and check it like the
 other CODA types.
+
+- From `cap.raw`: 60 frames, 4.5 ms per frame in the encoder, I and P
+  frames correct.
+- From the camera (`j1-h264.sh 300`, cached camera buffers): 29.6 fps, the
+  full sensor rate. Per frame: input 5.9 ms, convert 24.6 ms, encode
+  3.2 ms. About 1 Mbit/s at QP 30.
+- Bug: a green bar at the bottom. The SPS had no frame cropping, so the
+  stream decoded as 960x544. Lines 540-543 are data from past the luma
+  plane. The driver set the SPS level in `header_code` before the crop
+  check, which compares `header_code` with the SPS code. Fixed in 0920
+  (build fork commit after `50d44df6`).
