@@ -51,6 +51,35 @@ v4l2-ctl prints the frame rate. In a second `screen` window, run `top -d 1`.
 The frames go to memory by DMA, so the CPU load should stay low. To count the
 frame interrupts, compare `grep -e csi -e video-input /proc/interrupts` twice.
 
+## Encode to H.264 (on the board)
+
+`cam2h264` converts each raw frame to 960x540 NV12 on the CPU and encodes
+it with the SG2000's CODA980. See [../h264-test.md](../h264-test.md) for the
+kernel, overlay and firmware.
+
+Build it on the PC (static, so the board's libc does not matter):
+
+    riscv64-linux-gnu-gcc -O2 -static -o cam2h264 cam2h264.c -lm
+
+Copy `cam2h264`, `j1-stream.sh` and `j1-h264.sh` to one directory on the
+board. Then:
+
+    GAIN=256 ./j1-h264.sh 300            # 300 frames to out.h264
+    ./cam2h264 -i cap.raw -n 60          # from a raw capture, no camera
+    ./cam2h264 -i cap.raw -n 4 -y a.nv12 # conversion only, no encoder
+
+Options: `-q` QP (default 30, lower is better quality), `-g` GOP size,
+`-s` saturation, `-o` output file. At the end it prints the frame rate and
+the time per frame for input, conversion and encoding.
+
+Play the stream on the PC:
+
+    ffplay -f h264 out.h264
+    ffmpeg -framerate 30 -i out.h264 -c copy out.mp4
+
+The conversion uses the top 8 bits of each sample, one pixel per 2x2 Bayer
+cell, gray-world white balance and exposure, and no colour matrix.
+
 ## Other tools
 
 - `j1-diag.sh` (board): samples the CSI-2 lane state during a stream and dumps

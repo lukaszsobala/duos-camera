@@ -4,6 +4,7 @@
 # GAIN is the sensor analogue_gain control: 64 = 1x (the default), 1024 = 16x.
 # frames = 0 streams until Ctrl-C and writes no file unless OUT is set: use
 # it to watch the CPU load in top while the camera runs.
+# frames = setup configures the pipeline, prints VIDEO=<raw node>, and stops.
 # Pattern 0 = the sensor. 1-4 = the VI bridge's own generator, which
 # starts neither the receiver nor the sensor. Frames land in /root/cap.raw
 # (packed RAW12, back to back), or OUT. Adapted from tools/stream.sh in
@@ -31,6 +32,11 @@ esac
 v4l2-ctl -d "$BRIDGE" -c test_pattern="$TP"
 v4l2-ctl -d "$VIDEO" --set-fmt-video width=$W,height=$H,pixelformat=$PIX || exit 1
 echo "$SNAME $CODE ${W}x${H} -> $PIX, bridge pattern $TP"
+
+if [ "$N" = setup ]; then
+	echo "VIDEO=$VIDEO"
+	exit 0
+fi
 
 if [ "$N" = 0 ]; then
 	echo "streaming until Ctrl-C; v4l2-ctl prints the frame rate"
