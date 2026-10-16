@@ -190,3 +190,11 @@ without the line buffers in the SRAM.
 Next kernel (P7372): 1 MiB code window and 1 MiB temp buffer, like the
 Chips&Media package and the Amlogic driver. Sophgo uses 256 KiB and
 512 KiB.
+
+### 2026-10-17, kernel P7372 (1 MiB code window)
+
+- Same hang, same PC (0x1838-0x1842), with the StarFive firmware.
+- No driver-side difference to the working references is left. Open
+  question: does the vendor stack encode H.265 on the SG2000 at all? Test:
+  official Milk-V image, `sample_venc -c 265 -w 960 -h 540
+  --pixel_format=2 -i cap.raw -o enc -n 10`.
