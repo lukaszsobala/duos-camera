@@ -249,10 +249,20 @@ static void set_ctrl(int fd, uint32_t id, int32_t val, const char *name)
 			strerror(errno));
 }
 
-static void map_bufs(int fd, enum v4l2_buf_type type, struct buf *b, int n)
+#ifndef V4L2_MEMORY_FLAG_NON_COHERENT
+#define V4L2_MEMORY_FLAG_NON_COHERENT	(1 << 0)
+#endif
+
+/*
+ * flags = V4L2_MEMORY_FLAG_NON_COHERENT asks for cached buffers. Return
+ * the flags that the driver accepted.
+ */
+static unsigned int map_bufs(int fd, enum v4l2_buf_type type, struct buf *b,
+			     int n, unsigned int flags)
 {
 	struct v4l2_requestbuffers rb = {
 		.count = n, .type = type, .memory = V4L2_MEMORY_MMAP,
+		.flags = flags,
 	};
 	int i;
 
@@ -273,6 +283,7 @@ static void map_bufs(int fd, enum v4l2_buf_type type, struct buf *b, int n)
 		if (b[i].p == MAP_FAILED)
 			die("mmap");
 	}
+	return rb.flags;
 }
 
 static void qbuf(int fd, enum v4l2_buf_type type, int i, size_t used)
@@ -315,6 +326,7 @@ int main(int argc, char **argv)
 	struct buf cam[NBUF_CAM], eout[NBUF_ENC_OUT], ecap[NBUF_ENC_CAP];
 	int stride = (RAW_W * 3 / 2 + 15) / 16 * 16;
 	int cfd = -1, efd, ifd = -1, ofd, opt, n, free_out = NBUF_ENC_OUT;
+	int cam_cached = 0;
 	size_t raw_size, nv12_size = OUT_W * OUT_H * 3 / 2;
 	uint8_t *raw, *nv12;
 	double t_cap = 0, t_conv = 0, t_enc = 0, t0, t1, t_start;
@@ -439,8 +451,8 @@ int main(int argc, char **argv)
 		set_ctrl(efd, V4L2_CID_MPEG_VIDEO_BITRATE, 0, "bitrate");
 	}
 	if (efd >= 0) {
-		map_bufs(efd, V4L2_BUF_TYPE_VIDEO_OUTPUT, eout, NBUF_ENC_OUT);
-		map_bufs(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, ecap, NBUF_ENC_CAP);
+		map_bufs(efd, V4L2_BUF_TYPE_VIDEO_OUTPUT, eout, NBUF_ENC_OUT, 0);
+		map_bufs(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, ecap, NBUF_ENC_CAP, 0);
 		for (n = 0; n < NBUF_ENC_CAP; n++)
 			qbuf(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, n, 0);
 		stream(efd, V4L2_BUF_TYPE_VIDEO_OUTPUT, 1);
@@ -448,7 +460,16 @@ int main(int argc, char **argv)
 	}
 
 	if (cfd >= 0) {
-		map_bufs(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, cam, NBUF_CAM);
+		/*
+		 * Cached buffers: the kernel invalidates the cache at DQBUF,
+		 * and the conversion reads the frame in place. Uncached, a
+		 * copy with wide loads is faster than reading in place.
+		 */
+		cam_cached = map_bufs(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, cam,
+				      NBUF_CAM, V4L2_MEMORY_FLAG_NON_COHERENT) &
+			     V4L2_MEMORY_FLAG_NON_COHERENT;
+		fprintf(stderr, "camera buffers: %s\n",
+			cam_cached ? "cached" : "uncached, copied");
 		for (n = 0; n < NBUF_CAM; n++)
 			qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, n, 0);
 		stream(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, 1);
@@ -474,8 +495,9 @@ int main(int argc, char **argv)
 
 	t_start = now_ms();
 	for (n = 0; !stop && (frames == 0 || n < frames); n++) {
+		const uint8_t *src = raw;
 		size_t used;
-		int i;
+		int i, ci = -1;
 
 		/* Get a raw frame */
 		t0 = now_ms();
@@ -483,8 +505,13 @@ int main(int argc, char **argv)
 			i = dqbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, NULL);
 			if (i < 0)
 				break;
-			copy64(raw, cam[i].p, raw_size);
-			qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, i, 0);
+			if (cam_cached) {
+				src = cam[i].p;
+				ci = i;		/* queue it after the conversion */
+			} else {
+				copy64(raw, cam[i].p, raw_size);
+				qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, i, 0);
+			}
 		} else {
 			off_t pos = (off_t)(n % in_frames) * raw_size;
 
@@ -496,8 +523,10 @@ int main(int argc, char **argv)
 
 		/* Convert into a free encoder input buffer */
 		if (n % 15 == 0)
-			update_awb(raw, stride);
-		raw_to_nv12(raw, stride, nv12, sat);
+			update_awb(src, stride);
+		raw_to_nv12(src, stride, nv12, sat);
+		if (ci >= 0)
+			qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, ci, 0);
 		if (yuv_file) {
 			if (write(ofd, nv12, nv12_size) != (ssize_t)nv12_size)
 				die("write");

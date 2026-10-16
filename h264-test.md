@@ -117,8 +117,8 @@ one 0920 serves both patch directories.
   VPU address 0, 0xE400 bytes. The driver gives it to the H.264 core but
   does not use it yet.
 - The frame endian bit (0x10). The vendor sets it; the driver does the same.
-- JPEG: whether the JPU INIT command is a sufficient reset after each frame.
-  The CODA960 resets the whole codec there.
+- JPEG: answered, see Results. INIT is enough after a complete frame, but
+  not after a stall.
 
 ## Report back
 
@@ -127,4 +127,22 @@ The output of each step. For steps 2 to 4, the `.h264`, `.jpg` and
 
 ## Results
 
-None yet.
+**JPEG, 2026-10-16, riscv64 edge 7.2.** The JPU works. Without firmware it
+probes and registers `coda-jpeg-encoder` (`no iram` is expected).
+
+- First run: 1 frame in 1030 ms, cut at 64 KiB. coda gives the capture
+  buffer 1 bit per pixel when the application asks for no size. The frame
+  did not fit, the JPU stalled, and the 1 s timeout returned it cut.
+  cam2h264 now asks for 12 bits per pixel.
+- The next frame had wrong DC predictions: the first MCU correct, all others
+  offset (Y -61, Cb +59, Cr +12). INIT does not clear that state after a
+  stall; one complete frame does. The vendor pulses `RST_JPEG` after a
+  timeout. The driver should do the same.
+- From `cap.raw`: 60 frames, 10.7 ms per frame in the JPU, correct colours.
+- Live view (`j1-http.sh -Q 70`, USB network): works. 8.4 fps. Per frame:
+  input 68.7 ms (copy from uncached camera buffers), convert 46.5 ms,
+  encode 4.4 ms. 45-67 KB per frame. Better over USB than over Wi-Fi.
+- mjpeg-http first dropped every frame: coda pads its header with one 0x00
+  byte before SOS. The parser now skips it, as libjpeg does.
+
+H.264: not tested yet.

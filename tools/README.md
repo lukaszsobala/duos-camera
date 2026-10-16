@@ -61,7 +61,10 @@ firmware.
 Build it on the board:
 
     apt install gcc libc6-dev
-    gcc -O2 -o cam2h264 cam2h264.c -lm
+    gcc -O3 -mcpu=thead-c906 -o cam2h264 cam2h264.c -lm
+
+`-mcpu=thead-c906` (gcc 13 or later) adds the C906's T-Head extensions.
+With an older gcc, leave it out.
 
 Do not cross-build on an Ubuntu 26.04 PC. Its `riscv64-linux-gnu-gcc` and
 static libc target RVA23 (vector 1.0, Zba/Zbb). The SG2000's C906 is
