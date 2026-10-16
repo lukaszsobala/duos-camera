@@ -413,6 +413,12 @@ int main(int argc, char **argv)
 		f.fmt.pix.height = OUT_H;
 		f.fmt.pix.pixelformat = jpeg ? V4L2_PIX_FMT_JPEG :
 					       V4L2_PIX_FMT_H264;
+		/*
+		 * Without a size, coda allocates 1 bit per pixel (64 KiB). A
+		 * larger frame stalls the encoder until the 1 s timeout, and
+		 * the driver returns it cut short.
+		 */
+		f.fmt.pix.sizeimage = nv12_size;
 		xioctl(efd, VIDIOC_S_FMT, &f, "encoder CAPTURE VIDIOC_S_FMT");
 
 		/* The JPEG encoder has no frame rate */
