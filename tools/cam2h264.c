@@ -19,11 +19,22 @@
  *   -Q N     JPEG quality, 5-100 (default 85)
  *   -s F     colour saturation (default 1.5)
  *   -y FILE  write NV12 frames to FILE, without the encoder
+ *   -S DEV   sensor subdev for auto exposure (default: the subdev named
+ *            gc2083...)
+ *   -M       no auto exposure: keep the sensor exposure and gain
+ *   -F HZ    mains frequency, 50 or 60: exposure times in steps of the
+ *            light flicker period, against banding. 0 = off (default 50)
+ *   -G X     highest analogue gain for auto exposure (default 32x)
  *
  * The input is packed RAW12, RGGB, 1920x1080, 10-bit data in the top bits.
  * Each 2x2 Bayer cell becomes one output pixel: 960x540. The program uses
- * only the top 8 bits of each sample. White balance and exposure are
- * gray-world, from a sample of each frame. There is no colour matrix.
+ * only the top 8 bits of each sample. White balance is gray world, from a
+ * sample of each frame. There is no colour matrix.
+ *
+ * Exposure: with -c, auto exposure sets the sensor exposure time first,
+ * then its analogue gain, for a mean green of 18% of white. Software gain
+ * is added only when the sensor is at its limits. With -i or -M, the
+ * software gain alone sets the exposure.
  *
  * Build: cc -O2 -o cam2h264 cam2h264.c -lm
  */
@@ -58,8 +69,22 @@ struct buf {
 
 static volatile sig_atomic_t stop;
 static uint8_t lut_r[256], lut_g[256], lut_b[256];
+/* White balance gains, and the software (digital) exposure gain */
 static double gain_r = 1.6, gain_b = 1.6, expo = 4.0;
 static int awb_done;
+
+/* Mean green of 18% of white, in 8-bit samples above black */
+#define AE_TARGET	(0.18 * (255 - BLACK))
+/* The highest software gain when the sensor is at its limits */
+#define AE_DIGITAL_MAX	8.0
+
+/* Auto exposure through the sensor subdev controls */
+static struct {
+	int fd;				/* < 0: no auto exposure */
+	int exp, exp_min, exp_max;	/* exposure, in lines */
+	int gain, gain_min, gain_max;	/* analogue gain; gain_min = 1x */
+	int flicker;			/* lines per flicker period, 0: off */
+} ae = { .fd = -1 };
 
 static void on_sigint(int sig)
 {
@@ -90,8 +115,12 @@ static double now_ms(void)
 	return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
 }
 
-/* Find the video device that the coda driver registered as name */
-static int find_encoder(const char *want, char *path, size_t len)
+/*
+ * Find the device node (videoN or v4l-subdevN, by the node prefix) whose
+ * name starts with want
+ */
+static int find_node(const char *node, const char *want, char *path,
+		     size_t len)
 {
 	DIR *d = opendir("/sys/class/video4linux");
 	struct dirent *e;
@@ -103,7 +132,7 @@ static int find_encoder(const char *want, char *path, size_t len)
 	while (!found && (e = readdir(d))) {
 		FILE *f;
 
-		if (strncmp(e->d_name, "video", 5))
+		if (strncmp(e->d_name, node, strlen(node)))
 			continue;
 		snprintf(fn, sizeof(fn), "/sys/class/video4linux/%s/name",
 			 e->d_name);
@@ -137,8 +166,9 @@ static void build_luts(void)
 }
 
 /*
- * Gray world on a sample of the cells: equal channel means, and a mean
- * green of 18% of white. Cells with a clipped sample do not count.
+ * Gray world on a sample of the cells: equal channel means, and without
+ * auto exposure a mean green of 18% of white. Cells with a clipped sample
+ * do not count.
  */
 static void update_awb(const uint8_t *raw, int stride)
 {
@@ -162,18 +192,20 @@ static void update_awb(const uint8_t *raw, int stride)
 	}
 	if (n < 100 || sr < n || sg < n || sb < n)
 		return;
-	t = 0.18 * (255 - BLACK) / (sg / n);
+	t = AE_TARGET / (sg / n);
 	t = t < 1 ? 1 : t > 64 ? 64 : t;
 	/* Take the first estimate as it is, then smooth */
 	if (!awb_done) {
 		gain_r = sg / sr;
 		gain_b = sg / sb;
-		expo = t;
+		if (ae.fd < 0)
+			expo = t;
 		awb_done = 1;
 	} else {
 		gain_r = 0.7 * gain_r + 0.3 * (sg / sr);
 		gain_b = 0.7 * gain_b + 0.3 * (sg / sb);
-		expo = 0.7 * expo + 0.3 * t;
+		if (ae.fd < 0)
+			expo = 0.7 * expo + 0.3 * t;
 	}
 	build_luts();
 }
@@ -250,6 +282,157 @@ static void set_ctrl(int fd, uint32_t id, int32_t val, const char *name)
 			strerror(errno));
 }
 
+/* The current value of a control, 32 or 64 bit. -1 on error. */
+static int64_t get_ctrl(int fd, uint32_t id)
+{
+	struct v4l2_query_ext_ctrl q = { .id = id };
+	struct v4l2_ext_control c = { .id = id };
+	struct v4l2_ext_controls cs = {
+		.which = V4L2_CTRL_WHICH_CUR_VAL, .count = 1, .controls = &c,
+	};
+
+	if (ioctl(fd, VIDIOC_QUERY_EXT_CTRL, &q) < 0 ||
+	    ioctl(fd, VIDIOC_G_EXT_CTRLS, &cs) < 0)
+		return -1;
+	return q.type == V4L2_CTRL_TYPE_INTEGER64 ? c.value64 : c.value;
+}
+
+static int ctrl_range(int fd, uint32_t id, int *min, int *max)
+{
+	struct v4l2_query_ext_ctrl q = { .id = id };
+
+	if (ioctl(fd, VIDIOC_QUERY_EXT_CTRL, &q) < 0)
+		return -1;
+	*min = q.minimum;
+	*max = q.maximum;
+	return 0;
+}
+
+/*
+ * Open the sensor subdev for auto exposure. max_gain is the highest
+ * analogue gain, in x. hz is the mains frequency, 0 for no flicker steps.
+ */
+static void ae_open(const char *dev, int max_gain, int hz)
+{
+	int64_t rate, hblank;
+
+	ae.fd = open(dev, O_RDWR);
+	if (ae.fd < 0) {
+		perror(dev);
+		fprintf(stderr, "no auto exposure\n");
+		return;
+	}
+	if (ctrl_range(ae.fd, V4L2_CID_EXPOSURE, &ae.exp_min, &ae.exp_max) ||
+	    ctrl_range(ae.fd, V4L2_CID_ANALOGUE_GAIN, &ae.gain_min,
+		       &ae.gain_max) ||
+	    (ae.exp = get_ctrl(ae.fd, V4L2_CID_EXPOSURE)) < 0 ||
+	    (ae.gain = get_ctrl(ae.fd, V4L2_CID_ANALOGUE_GAIN)) < 0) {
+		fprintf(stderr, "%s: no exposure or gain control: no auto "
+			"exposure\n", dev);
+		close(ae.fd);
+		ae.fd = -1;
+		return;
+	}
+	if (max_gain > 0 && (int64_t)ae.gain_min * max_gain < ae.gain_max)
+		ae.gain_max = ae.gain_min * max_gain;
+
+	/* Flicker period in lines: a line is (width + hblank) pixels */
+	rate = get_ctrl(ae.fd, V4L2_CID_PIXEL_RATE);
+	hblank = get_ctrl(ae.fd, V4L2_CID_HBLANK);
+	if (hz > 0 && rate > 0 && hblank >= 0)
+		ae.flicker = (int)(rate / (2.0 * hz) / (RAW_W + hblank) + 0.5);
+	if (ae.flicker > ae.exp_max)
+		ae.flicker = 0;
+
+	expo = 1;
+	fprintf(stderr, "auto exposure: %s, exposure %d-%d lines, gain up to "
+		"%.0fx, flicker step %d lines\n", dev, ae.exp_min, ae.exp_max,
+		(double)ae.gain_max / ae.gain_min, ae.flicker);
+}
+
+/*
+ * Mean green of a sample of cells, above black. Clipped cells count, and
+ * clipped is set to their share.
+ */
+static double ae_measure(const uint8_t *raw, int stride, double *clipped)
+{
+	double sg = 0, n = 0, nc = 0;
+	int x, y;
+
+	for (y = 0; y < RAW_H; y += 16) {
+		const uint8_t *r0 = raw + y * stride, *r1 = r0 + stride;
+
+		for (x = 0; x < OUT_W; x += 8) {
+			int r = r0[3 * x], g = (r0[3 * x + 1] + r1[3 * x]) / 2,
+			    b = r1[3 * x + 1];
+
+			if (r > 250 || g > 250 || b > 250)
+				nc++;
+			sg += g > BLACK ? g - BLACK : 0;
+			n++;
+		}
+	}
+	*clipped = nc / n;
+	return sg / n;
+}
+
+/*
+ * One step of auto exposure. The sensor applies a new exposure about two
+ * frames later: call this every third frame.
+ */
+static void ae_update(const uint8_t *raw, int stride)
+{
+	double clipped, mean = ae_measure(raw, stride, &clipped);
+	double ratio = AE_TARGET / ((mean > 0.5 ? mean : 0.5) * expo);
+	double want, e, g, d;
+	struct v4l2_ext_control c[2] = {
+		{ .id = V4L2_CID_EXPOSURE }, { .id = V4L2_CID_ANALOGUE_GAIN },
+	};
+	struct v4l2_ext_controls cs = {
+		.which = V4L2_CTRL_WHICH_CUR_VAL, .count = 2, .controls = c,
+	};
+
+	/* Clipped highlights: darker, whatever the mean says */
+	if (clipped > 0.02 && ratio > 0.8)
+		ratio = 0.8;
+	if (ratio > 0.92 && ratio < 1.08)
+		return;
+	/* Most of the way, at most 4x per step: no overshoot */
+	ratio = pow(ratio, 0.7);
+	ratio = ratio < 0.25 ? 0.25 : ratio > 4 ? 4 : ratio;
+	want = (double)ae.exp * ae.gain * expo * ratio;
+
+	/* Exposure time first, in whole flicker periods when it is long */
+	e = want / ae.gain_min;
+	if (ae.flicker && e >= ae.flicker)
+		e = (int)(e / ae.flicker) * ae.flicker;
+	if (e > ae.exp_max)
+		e = ae.flicker ? (ae.exp_max / ae.flicker) * ae.flicker :
+				 ae.exp_max;
+	if (e < ae.exp_min)
+		e = ae.exp_min;
+	/* Then analogue gain, then software gain */
+	g = want / e;
+	g = g < ae.gain_min ? ae.gain_min : g > ae.gain_max ? ae.gain_max : g;
+	d = want / (e * g);
+	d = d < 1 ? 1 : d > AE_DIGITAL_MAX ? AE_DIGITAL_MAX : d;
+
+	if ((int)e != ae.exp || (int)g != ae.gain) {
+		c[0].value = (int)e;
+		c[1].value = (int)g;
+		if (ioctl(ae.fd, VIDIOC_S_EXT_CTRLS, &cs) < 0) {
+			perror("auto exposure: VIDIOC_S_EXT_CTRLS");
+			return;
+		}
+		ae.exp = (int)e;
+		ae.gain = (int)g;
+	}
+	if (d != expo) {
+		expo = d;
+		build_luts();
+	}
+}
+
 #ifndef V4L2_MEMORY_FLAG_NON_COHERENT
 #define V4L2_MEMORY_FLAG_NON_COHERENT	(1 << 0)
 #endif
@@ -320,8 +503,9 @@ static void stream(int fd, enum v4l2_buf_type type, int on)
 int main(int argc, char **argv)
 {
 	const char *cam_dev = NULL, *in_file = NULL, *out_file = "out.h264";
-	const char *yuv_file = NULL;
-	char enc_dev[300] = "";
+	const char *yuv_file = NULL, *sensor_dev = NULL;
+	char enc_dev[300] = "", sensor_path[300];
+	int manual = 0, mains_hz = 50, max_gain = 32;
 	int frames = 300, qp = 30, gop = 30, sat = 384, jpeg = 0, quality = 85;
 	int hevc = 0;
 	size_t cap_size = 0;
@@ -336,7 +520,7 @@ int main(int argc, char **argv)
 	long long bytes = 0;
 	off_t in_frames = 0;
 
-	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:")) != -1) {
+	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:S:MF:G:")) != -1) {
 		switch (opt) {
 		case 'c': cam_dev = optarg; break;
 		case 'i': in_file = optarg; break;
@@ -351,11 +535,16 @@ int main(int argc, char **argv)
 		case 'x': hevc = 1; break;
 		case 'Q': quality = atoi(optarg); break;
 		case 'b': cap_size = strtoul(optarg, NULL, 0); break;
+		case 'S': sensor_dev = optarg; break;
+		case 'M': manual = 1; break;
+		case 'F': mains_hz = atoi(optarg); break;
+		case 'G': max_gain = atoi(optarg); break;
 		default:
 			fprintf(stderr, "usage: %s -c /dev/videoN | -i cap.raw "
 				"[-e enc] [-o out.h264] [-n frames] [-q qp] "
 				"[-g gop] [-s saturation] [-y out.nv12] "
-				"[-x] [-j] [-Q quality] [-b bytes]\n",
+				"[-x] [-j] [-Q quality] [-b bytes] "
+				"[-S subdev] [-M] [-F hz] [-G gain]\n",
 				argv[0]);
 			return 1;
 		}
@@ -373,7 +562,7 @@ int main(int argc, char **argv)
 	if (!strcmp(out_file, "out.h264") && (jpeg || hevc))
 		out_file = jpeg ? "out.mjpeg" : "out.h265";
 	if (!yuv_file && !enc_dev[0] &&
-	    !find_encoder(enc_name, enc_dev, sizeof(enc_dev))) {
+	    !find_node("video", enc_name, enc_dev, sizeof(enc_dev))) {
 		fprintf(stderr, "no %s device; is the driver loaded?\n", enc_name);
 		return 1;
 	}
@@ -393,6 +582,15 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		stride = f.fmt.pix.bytesperline;
+
+		if (!manual && !sensor_dev &&
+		    find_node("v4l-subdev", "gc2083", sensor_path,
+			      sizeof(sensor_path)))
+			sensor_dev = sensor_path;
+		if (!manual && sensor_dev)
+			ae_open(sensor_dev, max_gain, mains_hz);
+		else if (!manual)
+			fprintf(stderr, "no gc2083 subdev: no auto exposure\n");
 	} else {
 		ifd = open(in_file, O_RDONLY);
 		if (ifd < 0)
@@ -541,6 +739,8 @@ int main(int argc, char **argv)
 		/* Convert into a free encoder input buffer */
 		if (n % 15 == 0)
 			update_awb(src, stride);
+		if (ae.fd >= 0 && n % 3 == 0)
+			ae_update(src, stride);
 		raw_to_nv12(src, stride, nv12, sat);
 		if (ci >= 0)
 			qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, ci, 0);
@@ -583,9 +783,15 @@ int main(int argc, char **argv)
 		qbuf(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, i, 0);
 		t_enc += now_ms() - t0;
 
-		if (n % 30 == 0)
-			fprintf(stderr, "frame %d: %zu bytes, gains R %.2f B %.2f, "
-				"exposure %.1f\n", n, used, gain_r, gain_b, expo);
+		if (n % 30 == 0 && ae.fd >= 0)
+			fprintf(stderr, "frame %d: %zu bytes, WB R %.2f B %.2f, "
+				"exposure %d lines, gain %.2fx, digital %.2fx\n",
+				n, used, gain_r, gain_b, ae.exp,
+				(double)ae.gain / ae.gain_min, expo);
+		else if (n % 30 == 0)
+			fprintf(stderr, "frame %d: %zu bytes, WB R %.2f B %.2f, "
+				"digital gain %.2fx\n", n, used, gain_r, gain_b,
+				expo);
 	}
 	t1 = now_ms();
 

@@ -13,8 +13,9 @@ Needs `v4l-utils`, a kernel with the camera drivers, and
     GAIN=256 OUT=/dev/shm/cap.raw ./j1-stream.sh 0 4
 
 - `GAIN`: sensor analogue gain. 64 is 1x (the default), 256 is 4x, 1024 is
-  16x. Nothing sets the exposure automatically: use about 256 in a lit room,
-  1024 in dim light. Too much gain makes the bright areas white.
+  16x. A raw capture has no auto exposure: use about 256 in a lit room,
+  1024 in dim light. Too much gain makes the bright areas white. (`cam2h264`
+  below sets the exposure itself.)
 - `OUT`: the output file. Use `/dev/shm`, which is in RAM. The SD card is too
   slow for 90 MB/s and drops frames.
 - First argument: 0 for the sensor. 1-4 select the VI test patterns.
@@ -74,18 +75,29 @@ rv64gc: the binary stops with `Illegal instruction`.
 Put `cam2h264`, `j1-stream.sh` and `j1-h264.sh` in one directory on the
 board. Then:
 
-    GAIN=256 ./j1-h264.sh 300            # 300 frames to out.h264
+    ./j1-h264.sh 300                     # 300 frames to out.h264
     ./cam2h264 -i cap.raw -n 60          # from a raw capture, no camera
     ./cam2h264 -i cap.raw -n 4 -y a.nv12 # conversion only, no encoder
-    GAIN=256 ./j1-h264.sh 300 -x         # H.265 to out.h265
-    GAIN=256 ./j1-h264.sh 300 -j         # motion JPEG to out.mjpeg
+    ./j1-h264.sh 300 -j                  # motion JPEG to out.mjpeg
     ./cam2h264 -i cap.raw -n 1 -j -o a.jpg  # one JPEG
+    GAIN=256 ./j1-h264.sh 300            # fixed gain 4x, no auto exposure
 
 Options: `-q` QP (default 30, lower is better quality), `-g` GOP size,
 `-j` motion JPEG, `-Q` JPEG quality (default 85), `-s` saturation, `-o`
 output file (`-` for stdout), `-b` encoder output buffer size in bytes
-(default 12 bits per pixel; a small value forces a stall, for testing). At the end it prints the frame rate and
-the time per frame for input, conversion and encoding.
+(default 12 bits per pixel; a small value forces a stall, for testing). At
+the end it prints the frame rate and the time per frame for input,
+conversion and encoding.
+
+Auto exposure (from the camera only): `cam2h264` finds the `gc2083` subdev
+and sets the sensor exposure time first, then the analogue gain, for a mean
+green of 18% of white. Software gain (up to 8x) comes in only when the
+sensor is at its limits. Long exposures go in steps of the mains flicker
+period (10 ms at 50 Hz), against banding under lamps. Every 30 frames it
+prints the exposure in lines (1125 lines = 33 ms), the analogue gain and the
+software gain. Options: `-M` no auto exposure (the scripts add it when
+`GAIN` is set), `-F 60` for 60 Hz mains, `-F 0` for no flicker steps, `-G`
+the highest analogue gain (default 32x), `-S` the sensor subdev.
 
 Play the stream on the PC:
 
@@ -95,7 +107,7 @@ Play the stream on the PC:
     ffmpeg -framerate 30 -f mjpeg -i out.mjpeg -c copy out.mkv
 
 The conversion uses the top 8 bits of each sample, one pixel per 2x2 Bayer
-cell, gray-world white balance and exposure, and no colour matrix.
+cell, gray-world white balance, and no colour matrix.
 
 ## mjpeg-http: live view in a browser
 
@@ -108,7 +120,7 @@ board, like `cam2h264`:
 Put it next to `cam2h264`, `j1-stream.sh` and `j1-h264.sh`, with
 `j1-http.sh`. On the board:
 
-    GAIN=256 ./j1-http.sh            # PORT=n to change port 8080
+    ./j1-http.sh                     # PORT=n to change port 8080
 
 Then on the PC:
 
@@ -133,8 +145,7 @@ board:
 Put it next to `cam2h264`, `j1-stream.sh` and `j1-h264.sh`, with
 `j1-rtsp.sh`. On the board:
 
-    GAIN=256 ./j1-rtsp.sh            # PORT=n to change port 8554
-    GAIN=256 ./j1-rtsp.sh -x         # H.265
+    ./j1-rtsp.sh                     # PORT=n to change port 8554
 
 Then on the PC:
 
