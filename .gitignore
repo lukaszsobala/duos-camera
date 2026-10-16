@@ -11,3 +11,4 @@ modules.order
 Module.symvers
 __pycache__/
 /tools/cam2h264
+/tools/mjpeg-http

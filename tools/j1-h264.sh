@@ -9,5 +9,5 @@ N=${1:-300}
 [ $# -gt 0 ] && shift
 
 VIDEO=$(sh "$D/j1-stream.sh" 0 setup | sed -n 's/^VIDEO=//p')
-[ -n "$VIDEO" ] || { echo "pipeline setup failed"; exit 1; }
+[ -n "$VIDEO" ] || { echo "pipeline setup failed" >&2; exit 1; }
 exec "$D/cam2h264" -c "$VIDEO" -n "$N" "$@"

@@ -73,7 +73,7 @@ board. Then:
 
 Options: `-q` QP (default 30, lower is better quality), `-g` GOP size,
 `-j` motion JPEG, `-Q` JPEG quality (default 85), `-s` saturation, `-o`
-output file. At the end it prints the frame rate and
+output file (`-` for stdout). At the end it prints the frame rate and
 the time per frame for input, conversion and encoding.
 
 Play the stream on the PC:
@@ -85,6 +85,28 @@ Play the stream on the PC:
 
 The conversion uses the top 8 bits of each sample, one pixel per 2x2 Bayer
 cell, gray-world white balance and exposure, and no colour matrix.
+
+## mjpeg-http: live view in a browser
+
+`mjpeg-http` reads motion JPEG on stdin and serves it over HTTP as
+`multipart/x-mixed-replace`, the usual IP camera format. Build it like
+`cam2h264`:
+
+    riscv64-linux-gnu-gcc -O2 -static -o mjpeg-http mjpeg-http.c
+
+Copy it next to `cam2h264`, `j1-stream.sh` and `j1-h264.sh`, with
+`j1-http.sh`. On the board:
+
+    GAIN=256 ./j1-http.sh            # PORT=n to change port 8080
+
+Then on the PC:
+
+    http://<board>:8080/              page with the live picture
+    http://<board>:8080/stream        the stream: ffplay, VLC, Home Assistant
+    http://<board>:8080/snapshot.jpg  the latest frame
+
+A slow client skips frames, and does not slow the camera. The server has
+no authentication: everyone on the network can watch.
 
 ## Other tools
 

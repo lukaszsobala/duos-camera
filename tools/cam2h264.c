@@ -450,7 +450,10 @@ int main(int argc, char **argv)
 
 	if (yuv_file)
 		out_file = yuv_file;
-	ofd = open(out_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (!strcmp(out_file, "-"))
+		ofd = STDOUT_FILENO;
+	else
+		ofd = open(out_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (ofd < 0)
 		die(out_file);
 	signal(SIGINT, on_sigint);
