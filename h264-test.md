@@ -28,8 +28,8 @@ driver), 0924 (JPEG node in the overlay), and `CONFIG_VIDEO_CODA=m`. Build
 the riscv64 edge kernel as for the camera.
 
 The driver source is `~/Software/armbian/linux-gc2083`, branch `coda980`, on
-v7.2-rc7. The coda files are the same in 7.2.11 and 7.3-rc6, so one 0920
-serves both patch directories.
+v7.2-rc7. The coda files are the same in 7.2.11, 7.3-rc6 and 7.3-rc7, so
+one 0920 serves both patch directories.
 
 ## Board setup
 
@@ -43,8 +43,9 @@ serves both patch directories.
 
        overlays=camera-j1-gc2083 video-codec
 
-4. Copy `cam2h264` (built on the PC, see [tools/README.md](tools/README.md)),
-   `j1-stream.sh` and `j1-h264.sh` to one directory. Copy a raw capture
+4. Copy `cam2h264` and `mjpeg-http` (built on the PC, see
+   [tools/README.md](tools/README.md)), `j1-stream.sh`, `j1-h264.sh` and
+   `j1-http.sh` to one directory. Copy a raw capture
    too, for example `cap.raw`.
 5. Reboot.
 
@@ -85,6 +86,13 @@ serves both patch directories.
    Expected: `a.jpg` opens in an image viewer, and `out.mjpeg` plays with
    `ffplay -f mjpeg out.mjpeg`.
 
+5. Live view over HTTP (copy `mjpeg-http` and `j1-http.sh` too):
+
+       GAIN=256 ./j1-http.sh
+
+   Open `http://<board>:8080/` in a browser on the PC. Expected: a live
+   picture at about 30 fps.
+
 ## If a step fails
 
 - Step 1, `firmware request failed`: the file name or place is wrong.
@@ -113,7 +121,7 @@ serves both patch directories.
 ## Report back
 
 The output of each step. For steps 2 to 4, the `.h264`, `.jpg` and
-`.mjpeg` files.
+`.mjpeg` files. For step 5, the frame rate in the browser.
 
 ## Results
 

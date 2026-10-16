@@ -80,20 +80,27 @@ copies carry short ones.
 ## Baseline while the work continues
 
 **Mainline, and deliberately not the media tree.** Decided 2026-09-20: the
-series stays on a mainline base (currently v7.2-rc7) until there is something
-worth posting. No frame has come out of the sensor yet, so the receiver is the
-work — tracking a moving subsystem branch before then is churn for its own sake,
-and `media-committers.git next` can itself be rebased. The base barely matters
-in the meantime: hardware testing runs the Armbian copy, which is built against
-the 7.2 and 7.3 branches, not against this tree. This tree only exists to
-generate the postable series.
+series stays on a mainline base (currently v7.2-rc7) until it is ready to
+post. Hardware testing runs the Armbian copy, built against the 7.2 and 7.3
+branches, not this tree. This tree only generates the postable series.
+
+Since 2026-10-15 the driver gives correct frames on the PR #10936 receiver,
+so the "make it work first" condition is met.
 
 ## Before sending
 
 - **This is a v2.** Confirmed 2026-09-20: the original RFC v1 was posted, so the
   next posting is `--subject-prefix="RFC PATCH v2"` with a changelog under the
-  `---` line of each patch (and in the cover letter), saying the vendor's
-  resume-from-standby sequence is no longer applied on stream-on, and why.
+  `---` line of each patch (and in the cover letter). Changes since v1:
+  - the vendor's resume-from-standby sequence is no longer applied on
+    stream-on;
+  - link frequency 247.5/250 MHz (500 Mbit/s per lane), selected from the
+    MCLK rate, not 185.625 MHz; HTS 2962;
+  - MIPI output (`0x023e`) written after the controls on stream-on;
+  - flips grabbed while streaming; runtime PM puts use autosuspend;
+  - binding: `$ref` to video-interface-devices, node name `camera@37`.
+  The cover letter must also say that frames now come out (RFC v1 said
+  none had), on the Duo S with the PR #10936 receiver.
 - **Then, and only then, rebase onto `media-committers.git` `next`** — not onto
   a mainline -rc, and not onto linux-next. The media subsystem states its own
   baseline rule in

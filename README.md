@@ -1,30 +1,61 @@
 # Milk-V Duo S camera work
 
-Working files for getting the CAM-GC2083 on the J1 connector running under
-Armbian.
+Working files for the CAM-GC2083 on the J1 connector of the Milk-V Duo S,
+under Armbian.
 
-**Current state (2026-10-14):** the GC2083 now runs on the SG2000 receiver and
-capture drivers from armbian/build PR #10936, which stream on J2. Our own
-receiver, `duos-csi`, is retired. Branch `milkv-duos-camera` in the build fork
-carries the PR, the GC2083 patches and a J1 overlay. It produces
-correct 1920x1080 images since 2026-10-15, see [j1-test.md](j1-test.md). Stage 1 also had the wrong lane mapping, see
-that file.
+## Current state (2026-10-16)
 
-Two things live here, and they are testable independently:
+- **The camera works.** The GC2083 gives correct 1920x1080 frames at 29.7 fps
+  on J1. The SG2000 receiver and capture drivers come from armbian/build PR
+  #10936 (`cv1800-csi2`, `cv1800-vi`).
+- **The GC2083 patches are in PR #10936.** leafpmpmp merged our
+  `duos-camera-j1` branch on 2026-10-16: patches 0910-0913, and
+  `overlays=camera-j1-gc2083`. Since then the J1 and J2 overlays share
+  `sg2000-camera.dtsi`.
+- **Hardware encoders, not tested yet.** The local build branch
+  `duos-coda980` adds the SG2000 H.264 encoder (CODA980) and JPEG unit to
+  the mainline `coda` driver: patches 0920-0924. See
+  [h264-test.md](h264-test.md). These patches are not for PR #10936.
+- **Upstream.** RFC v1 of the driver went to linux-media. The next posting
+  is v2, see [patches/upstream-rfc-v1/NOTES.md](patches/upstream-rfc-v1/NOTES.md).
 
-1. **`duos-cam-j1-probe.sh` + `duos-mclk/`** - a smoke test that answers "does
-   the sensor answer on I2C at all". Needs nothing rebuilt. Do this first. It
-   **passes**: `0x37` answers and the chip ID reads `0x20 0x83`.
-2. **`gc2083.c` + `galaxycore,gc2083.yaml` + `patches/`** - a mainline-style
-   V4L2 sensor driver. Needs a kernel rebuild, and can only be partly tested
-   until there is a CSI-2 receiver driver for the SG2000.
+## Where to start
 
-`tools/` holds the capture script and the converter that turns captured frames
-into PNG images. **To take a picture, see [tools/README.md](tools/README.md).**
+| Task                                   | File                                   |
+|----------------------------------------|----------------------------------------|
+| Test the camera on a new kernel        | [j1-test.md](j1-test.md)               |
+| Take a picture, convert it to PNG      | [tools/README.md](tools/README.md)     |
+| Encode H.264 or MJPEG, live view (HTTP) | [h264-test.md](h264-test.md), [tools/README.md](tools/README.md) |
+| What the driver does and assumes       | "What the driver supports" below       |
 
-`led/` is unrelated to the camera - it turns the blue user LED off. It is here
-only because this is where Duo S odds and ends that are not in the build live.
-See `led/README.md`.
+## Files
+
+Current:
+
+- `gc2083.c`, `galaxycore,gc2083.yaml`: the sensor driver and its binding.
+  This is the source. The driver in `patches/0911` must stay byte-identical.
+- `patches/`: the Armbian copies of 0910-0913 and 0920-0924, from the 7.2
+  patch directory. The 7.3 copy of 0911 differs only in the MAINTAINERS
+  line number. `patches/upstream-rfc-v1/`: the linux-media series.
+- `tools/`: capture, conversion, encoding and live view. See
+  [tools/README.md](tools/README.md).
+- `j1-test.md`, `h264-test.md`: runbooks and results.
+- `Makefile`: builds `gc2083.ko` out of tree.
+
+History, kept as a record. Do not use these on a current kernel:
+
+- `duos-cam-j1-probe.sh`, `duos-mclk/`: Test 1, the I2C smoke test.
+- `duos-cam-stub/`, `duos-cam.dts`: Test 3, a receiver that receives
+  nothing.
+- `duos-csi/`, `duos-cam-csi.dts`, `receiver-plan.md`, `stage1-test.md`:
+  our own receiver, retired on 2026-10-14. Its lane mapping is wrong.
+
+`led/` is not camera work. It turns the blue user LED off. See
+[led/README.md](led/README.md).
+
+The sections below "Board facts" are the bring-up log, from before the
+receiver existed. Their overlays, link frequency and build steps are out of
+date. Each section says so where it matters.
 
 ## Board facts
 
@@ -45,6 +76,9 @@ enables i2c3 with no `pinctrl-0` of its own, which is why that matters.
 ---
 
 # Test 1: does the sensor answer? (no rebuild needed)
+
+> **History.** This test passed on 2026-08-11. The driver now enables MCLK and
+> releases reset itself. Do not load `duos-mclk.ko` on a current kernel.
 
 `duos-cam-j1-probe.sh` dumps pinmux and clock state, releases GPIOA_2, loads the
 MCLK module if it finds it, scans i2c-3, and reads the chip ID at
@@ -189,6 +223,12 @@ Or just reboot.
 ---
 
 # Test 2: the sensor driver
+
+> **History, up to "The upstream series".** PR #10936 now carries the
+> patches, the config symbols and the J1 overlay. The overlays and the
+> 185.625 MHz link frequency below are from before the receiver existed. The
+> driver now uses 247.5 MHz (MCLK 23.76 MHz) or 250 MHz (MCLK 24 MHz), and
+> HTS 2962 instead of 2200.
 
 If you only want the steps in order, skip to "Protocol: gc2083.ko on the board"
 below. This section is the reasoning behind them.
@@ -462,86 +502,59 @@ redundant.
 
 ## The upstream series
 
-`patches/upstream-rfc-v1/` holds the linux-media posting: cover letter, binding,
-driver, and a `NOTES.md` covering what was checked and how to send it. It is
-generated from a separate clean tree, `~/Software/armbian/linux-gc2083`, branch
-`gc2083`, based on mainline **v7.2-rc7** - not on the Armbian worktree, which
-carries a few hundred Armbian patches and cannot produce a postable diff.
+`patches/upstream-rfc-v1/` holds the RFC v1 posting to linux-media: cover
+letter, binding, driver, and `NOTES.md`. The patches come from a separate
+clean tree, `~/Software/armbian/linux-gc2083`, branch `gc2083`, on mainline
+v7.2-rc7. The Armbian worktree cannot produce a postable diff.
 
-`dt_binding_check` and `checkpatch --strict` both pass there, and the driver
-builds warning-free at `W=1` for riscv. Those were the two checks listed here as
-never run; they have now been run. `CHECK_DTBS` still has nothing to check,
-because the series deliberately adds no DTS: a sensor node with nothing at the
-far end of its graph does not probe, so an in-tree node has to wait for an
-SG2000 receiver driver to exist.
+RFC v1 said that no frame had come out of the driver. That is no longer
+true: since 2026-10-15 the driver gives correct images. The `gc2083` branch
+holds the reworked driver, which is byte-identical to `gc2083.c` here. The
+next posting is v2. Its changelog and baseline are in
+[NOTES.md](patches/upstream-rfc-v1/NOTES.md).
 
-It goes out as **RFC**, for one reason: no frame has ever come out of this
-driver, and the cover letter says so in its second paragraph. Everything that
-has been verified was verified over I2C. The three open questions - Bayer order,
-whether the flip writes take effect, which parts of the vendor init matter - are
-in the cover letter as the things review is wanted on, rather than left for a
-reviewer to find.
-
-Two changes were made to the driver for upstream, and **neither has been
-retested on hardware**:
-
-- `devm_v4l2_sensor_clk_get_legacy()` became `devm_v4l2_sensor_clk_get()`. The
-  legacy helper's own kernel-doc says it "must not be used in any new driver",
-  and on a DT platform it calls `clk_set_rate(24MHz)` and then ignores what the
-  clock actually landed on - which is precisely how 23.76MHz went unnoticed
-  here. The non-legacy helper does not touch the rate at all, leaving it to
-  `assigned-clock-rates` in the overlay, which is already there and already
-  produces the same 23.76MHz. Behaviour on this board should be unchanged.
-- Probe now reads `clk_get_rate()` and `dev_warn`s when it is not 24MHz, so the
-  next person sees the 1% immediately instead of deriving it from `clk_summary`.
-
-We are keeping 23.76MHz. The alternative was reprogramming `clk_cam0pll`, and
-the attempt to test that hung the board: `fpll_determine_rate()` and
-`fpll_set_rate()` in `drivers/clk/sophgo/clk-cv18xx-pll.c` both index
-`pll->pll_limit[2]` on a two-element array, and the garbage bounds make
-`fpll_find_rate()`'s nested loops spin forever. That is an upstream bug in the
-sophgo clock driver, worth reporting on its own, and unrelated to this series.
-Testing it as a module rather than through the overlay is what kept it from
-being an unbootable board.
+MCLK stays at 23.76 MHz. Do not set a rate on `clk_cam0pll` to get 24 MHz:
+every CV1800 fractional PLL hangs the kernel on `set_rate`
+(`fpll_*_rate()` read `pll_limit[2]` of a two-element array). This is an
+upstream bug in the Sophgo clock driver, worth reporting on its own.
 
 ## What the driver supports
 
-1920x1080 RAW10 at 30fps, two lanes. Exposure, analogue gain, VBLANK/HBLANK,
-hflip/vflip, link frequency, pixel rate. Register sequences come from the vendor
-SDK's userspace sensor driver
-(`cvi_mpi/component/isp/sensor/cv181x/gcore_gc2083/`), which is the only public
-source of GalaxyCore's reference settings for this part.
+1920x1080 RAW10, two lanes. The register tables come from the vendor SDK's
+userspace sensor driver
+(`cvi_mpi/component/isp/sensor/cv181x/gcore_gc2083/`).
 
-Analogue gain is a ladder of 29 steps about 1.2x apart, each selected by writing
-thirteen unrelated registers. The driver exposes one continuous
-`V4L2_CID_ANALOGUE_GAIN` over the whole 1x-148x range, picks the step at or
-below what was asked, and trims the remainder in digital fine gain - which is
-what the vendor's own AE loop does with the same table.
+- **Link frequency** follows the MCLK rate: 247.5 MHz at 23.76 MHz (the Duo
+  S), 250 MHz at 24 MHz. The overlay must list the right one. Probe fails
+  with a message for any other MCLK rate.
+- **Timing:** HTS 2962, VTS 1125. 29.7 fps on the Duo S, 30 fps at 24 MHz.
+- **Controls:** exposure, analogue gain, VBLANK (frame rate), HBLANK (read
+  only), hflip/vflip, link frequency and pixel rate (read only).
+- **Flips** change the Bayer order, so they return EBUSY while streaming.
+- **Analogue gain** is a ladder of 29 steps, each set by 13 registers. The
+  driver exposes one control over 1x-148x. It picks the step at or below the
+  value, and sets the rest with digital fine gain, as the vendor's AE does.
 
 ## Things taken on faith
 
-- **Bayer order.** RGGB, because Sophgo's per-sensor table maps
-  `GCORE_GC2083_MIPI_2M_30FPS_10BIT` to `BAYER_RGGB`. First thing to check
-  against a real frame; if it is wrong the flip-derived codes are wrong too.
-- **Link frequency**, 185.625MHz, derived from the vendor's own HTS 2200 x VTS
-  1125 x 30fps over two RAW10 lanes rather than read off a datasheet.
-- **The stream on/off sequences** and the 0x031d hold/release around the gain
-  writes are reproduced verbatim from the vendor; which parts matter is unknown.
-- **That the flip writes do anything.** Both `0x0015` and its supposed shadow
-  `0x0d15` are write-only, so there is no way to confirm from the bus that
-  either took - unlike exposure and VTS, which read back exactly. The V4L2 side
-  is verified (the control moves the mbus code through the flip table); the
-  sensor side needs a frame. The same applies to the comment on
-  `GC2083_REG_FLIP_SHADOW`, which asserts more than can currently be shown.
-- **No test pattern control.** The vendor init writes 0x07/0xff to 0x008c/0x008d,
-  which on the related GC05A2 are the test-pattern registers - so a pattern
-  generator probably exists and would be genuinely useful for bringing up the
-  CSI receiver without optics. Not implemented because the semantics could not
-  be confirmed rather than because it is not wanted.
+- **The stream on/off sequences** and the 0x031d hold/release around the
+  gain writes are copied from the vendor. Which parts matter is unknown.
+- **That the flips change the image.** `0x0015` and `0x0d15` are
+  write-only. The flip controls work on the V4L2 side, but no frame has been
+  checked with a flip set.
+- **No test pattern control.** The vendor init writes 0x07/0xff to
+  0x008c/0x008d. On the related GC05A2 these are the test-pattern
+  registers. Not implemented: their meaning is not confirmed.
+
+Confirmed since the first version: the Bayer order RGGB (run 4 in
+[j1-test.md](j1-test.md)) and the link frequency (run 5).
 
 ---
 
 # Test 3: the stub receiver
+
+> **History.** The PR #10936 receiver replaces the stub. Use
+> [j1-test.md](j1-test.md).
 
 Test 2 ends at a wall. The sensor probes, identifies itself and manages its own
 power, but there is no `/dev/v4l-subdev0`, so nothing in userspace can open it -
@@ -653,6 +666,11 @@ there, so none of it has to be re-derived from
 ---
 
 # Building on the board itself
+
+> **History.** The steps below are still valid for a quick driver change
+> without a kernel build. But PR #10936 kernels already have the V4L2 CCI
+> symbols and `gc2083.ko`, and `overlays=camera-j1-gc2083` replaces the
+> numeric overlay below.
 
 Everything above builds on a host and copies the result across. Most of it
 builds just as well on the Duo S itself, and it is worth knowing which parts:

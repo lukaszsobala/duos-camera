@@ -21,9 +21,11 @@ are data lanes.
 
 ## Build
 
-Branch `duos-camera-j1` in the build fork, on top of the PR #10936 branch.
-The camera patches are one block: theirs 0900-0909, then the GC2083 binding
-and driver (0910/0911) and the J1 overlay (0912 riscv, 0913 arm64).
+The PR #10936 branch (`leafpmpmp/armbian-build`, branch `duos-camera`). It
+holds the GC2083 patches since 2026-10-16. The camera patches are one block:
+theirs 0900-0909, then the GC2083 binding and driver (0910/0911) and the J1
+overlay (0912 riscv, 0913 arm64). The J1 and J2 overlays include
+`sg2000-camera.dtsi`.
 
     ./compile.sh kernel BOARD=milkv-duos-riscv BRANCH=edge
 

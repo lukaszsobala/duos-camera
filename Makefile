@@ -18,8 +18,9 @@
 #        KDIR=~/Software/armbian/build/cache/sources/linux-kernel-worktree/7.2__sophgo-sg200x-riscv64__riscv64
 #
 # Either way this only links against a kernel whose config has V4L2_CCI_I2C and
-# VIDEO_V4L2_SUBDEV_API. A stock Armbian SG200x image has neither, and the build
-# stops at `v4l2_subdev_get_fmt undeclared` or at modpost `cci_read undefined`.
+# VIDEO_V4L2_SUBDEV_API. Kernels with the PR #10936 camera patches have both.
+# Without them the build stops at `v4l2_subdev_get_fmt undeclared` or at
+# modpost `cci_read undefined`.
 # See "Protocol: gc2083.ko on the board" in README.md.
 
 obj-m += gc2083.o
