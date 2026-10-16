@@ -1,0 +1,52 @@
+From 19d66f572ca3388cfb613433a0edb79f29a196b5 Mon Sep 17 00:00:00 2001
+From: Lukasz Sobala <lsobala1@gmail.com>
+Date: Sat, 17 Oct 2026 00:59:36 +0200
+Subject: [PATCH] libcamera: support the Sophgo CV1800/SG2000 VI and the GC2083
+
+Add the cv1800-vi raw capture driver to the simple pipeline handler, with
+the software ISP, and a camera sensor helper for the GalaxyCore GC2083.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/ipa/libipa/camera_sensor_helper.cpp  | 12 ++++++++++++
+ src/libcamera/pipeline/simple/simple.cpp |  1 +
+ 2 files changed, 13 insertions(+)
+
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index 359040e..d19ae0c 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -519,6 +519,18 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("gc08a3", CameraSensorHelperGc08a3)
+ 
++class CameraSensorHelperGc2083 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperGc2083()
++	{
++		/* 64 at 10 bits. The driver's gain code is linear: 64 = 1x. */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 1, 0, 0, 64 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("gc2083", CameraSensorHelperGc2083)
++
+ class CameraSensorHelperHm1246 : public CameraSensorHelper
+ {
+ public:
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 35c29ce..579cb7b 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -256,6 +256,7 @@ struct SimplePipelineInfo {
+ namespace {
+ 
+ static const SimplePipelineInfo supportedDevices[] = {
++	{ "cv1800-vi", {}, true },
+ 	{ "dcmipp", {}, false },
+ 	{ "imx7-csi", { { "pxp", 1 } }, true },
+ 	{ "intel-ipu6", {}, true },
+-- 
+2.53.0
+

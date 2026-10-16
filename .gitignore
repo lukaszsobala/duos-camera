@@ -13,3 +13,5 @@ __pycache__/
 /tools/cam2h264
 /tools/mjpeg-http
 /tools/h264-rtsp
+libcamera/work/
+libcamera/libcamera-riscv64.tar.gz
