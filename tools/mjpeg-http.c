@@ -156,8 +156,11 @@ static long jpeg_len(const uint8_t *b, size_t len)
 
 		if (p + 2 > len)
 			return 0;
-		if (b[p] != 0xff)
-			return -1;
+		/* coda pads its header with 0x00: skip it, as libjpeg does */
+		if (b[p] != 0xff) {
+			p++;
+			continue;
+		}
 		m = b[p + 1];
 		if (m == 0xff) {		/* fill byte */
 			p++;
