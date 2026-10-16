@@ -81,7 +81,8 @@ board. Then:
 
 Options: `-q` QP (default 30, lower is better quality), `-g` GOP size,
 `-j` motion JPEG, `-Q` JPEG quality (default 85), `-s` saturation, `-o`
-output file (`-` for stdout). At the end it prints the frame rate and
+output file (`-` for stdout), `-b` encoder output buffer size in bytes
+(default 12 bits per pixel; a small value forces a stall, for testing). At the end it prints the frame rate and
 the time per frame for input, conversion and encoding.
 
 Play the stream on the PC:
@@ -113,8 +114,35 @@ Then on the PC:
     http://<board>:8080/stream        the stream: ffplay, VLC, Home Assistant
     http://<board>:8080/snapshot.jpg  the latest frame
 
-A slow client skips frames, and does not slow the camera. The server has
-no authentication: everyone on the network can watch.
+A slow client skips frames, and does not slow the camera. The server
+counts the bytes still in the socket buffer, so the delay stays short on a
+slow link. The server has no authentication: everyone on the network can
+watch.
+
+## h264-rtsp: H.264 live view over RTSP
+
+`h264-rtsp` reads H.264 on stdin and serves it over RTSP, the usual IP
+camera protocol. It uses about a fifth of the MJPEG bandwidth. Browsers do
+not play RTSP: use VLC, ffplay, mpv, or Home Assistant. Build it on the
+board:
+
+    gcc -O2 -o h264-rtsp h264-rtsp.c
+
+Put it next to `cam2h264`, `j1-stream.sh` and `j1-h264.sh`, with
+`j1-rtsp.sh`. On the board:
+
+    GAIN=256 ./j1-rtsp.sh            # PORT=n to change port 8554
+
+Then on the PC:
+
+    ffplay -rtsp_transport tcp -fflags nobuffer rtsp://<board>:8554/
+    vlc rtsp://<board>:8554/
+    mpv --profile=low-latency rtsp://<board>:8554/
+
+RTP goes over the RTSP connection (TCP). A client that asks for UDP gets
+"461 Unsupported Transport" and retries over TCP. A client starts at the
+next IDR picture, at most 1 s with the default GOP of 30. A slow client
+skips to the next IDR picture. No authentication.
 
 ## Other tools
 

@@ -56,10 +56,14 @@ one 0920 serves both patch directories.
        dmesg | grep -i coda
 
    Expected:
-   - `Hardware product code 0x9800, firmware 0x...`
-   - `Initialized CODA980, firmware product 0x...., version ...`
+   - `Firmware code revision: 251448`
+   - `Initialized CODA980.` and `Firmware version: 3.0.1`
    - `coda-video-encoder registered as /dev/videoN`
    - `coda-jpeg-encoder registered as /dev/videoM`, from `b000000.jpeg`
+
+   `Wrong firmware` means a `coda980.bin` other than product 0xcc28.
+   Kernels before the cleanup print `Hardware product code 0x9800` and
+   `Initialized CODA980, firmware product 0xcc28` instead.
 
    The JPEG encoder does not need the H.264 firmware. If only the JPEG
    line is there, continue with step 4.
@@ -92,6 +96,24 @@ one 0920 serves both patch directories.
 
    Open `http://<board>:8080/` in a browser on the PC. Expected: a live
    picture at about 30 fps.
+
+6. H.264 live view over RTSP (copy `h264-rtsp` and `j1-rtsp.sh` too):
+
+       GAIN=256 ./j1-rtsp.sh
+
+   On the PC: `ffplay -rtsp_transport tcp -fflags nobuffer
+   rtsp://<board>:8554/`, or VLC. Expected: a live picture within 1 s,
+   960x540 with no green bar (kernel with the SPS crop fix).
+
+7. JPEG recovery after a stall (kernel with the `RST_JPEG` fix):
+
+       ./cam2h264 -i cap.raw -n 1 -j -b 65536 -o cut.jpg
+       dmesg | tail -3
+       ./cam2h264 -i cap.raw -n 1 -j -o a.jpg
+
+   Expected: the first run takes about 1 s, and dmesg shows `JPEG too
+   large for capture buffer` and `JPEG timeout: reset the JPU`. `a.jpg`
+   then has correct colours, not the pink cast.
 
 ## If a step fails
 
@@ -136,8 +158,10 @@ probes and registers `coda-jpeg-encoder` (`no iram` is expected).
   cam2h264 now asks for 12 bits per pixel.
 - The next frame had wrong DC predictions: the first MCU correct, all others
   offset (Y -61, Cb +59, Cr +12). INIT does not clear that state after a
-  stall; one complete frame does. The vendor pulses `RST_JPEG` after a
-  timeout. The driver should do the same.
+  stall; one complete frame does. The vendor driver has only INIT too (its
+  hardware reset hook is empty). The driver now pulses `RST_JPEG` after a
+  timeout, and clears the DC predictor registers before each frame.
+  Test with step 7.
 - From `cap.raw`: 60 frames, 10.7 ms per frame in the JPU, correct colours.
 - Live view (`j1-http.sh -Q 70`, USB network): works. 8.4 fps. Per frame:
   input 68.7 ms (copy from uncached camera buffers), convert 46.5 ms,

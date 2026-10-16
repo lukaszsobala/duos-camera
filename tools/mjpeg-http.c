@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/sockios.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
@@ -20,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -84,6 +86,22 @@ static void client_queue(struct client *c, const char *hdr, size_t hdr_len,
 		memcpy(c->out + hdr_len + body_len, tail, tail_len);
 	c->out_len = need;
 	c->out_off = 0;
+}
+
+/*
+ * A client gets a new frame when it has sent the last one. The socket
+ * buffer grows to megabytes on a slow link: count what is still in it too,
+ * or the delay grows.
+ */
+static int client_ready(struct client *c)
+{
+	int q = 0;
+
+	if (c->state != C_STREAM || c->out_off < c->out_len ||
+	    c->seq == last_seq)
+		return 0;
+	ioctl(c->fd, SIOCOUTQ, &q);
+	return (size_t)q < last_len;
 }
 
 static void queue_part(struct client *c)
@@ -200,7 +218,7 @@ static void new_frame(const uint8_t *f, size_t len)
 	last_len = len;
 	last_seq++;
 	for (i = 0; i < MAX_CLIENTS; i++)
-		if (cl[i].state == C_STREAM && cl[i].out_off == cl[i].out_len)
+		if (client_ready(&cl[i]))
 			queue_part(&cl[i]);
 }
 
@@ -264,7 +282,7 @@ static void client_write(struct client *c)
 		return;
 	if (c->state == C_CLOSE_AFTER)
 		client_close(c);
-	else if (c->state == C_STREAM && c->seq != last_seq)
+	else if (client_ready(c))
 		queue_part(c);		/* a frame came while sending */
 }
 

@@ -12,3 +12,4 @@ Module.symvers
 __pycache__/
 /tools/cam2h264
 /tools/mjpeg-http
+/tools/h264-rtsp

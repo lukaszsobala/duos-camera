@@ -322,6 +322,7 @@ int main(int argc, char **argv)
 	const char *yuv_file = NULL;
 	char enc_dev[300] = "";
 	int frames = 300, qp = 30, gop = 30, sat = 384, jpeg = 0, quality = 85;
+	size_t cap_size = 0;
 	const char *enc_name;
 	struct buf cam[NBUF_CAM], eout[NBUF_ENC_OUT], ecap[NBUF_ENC_CAP];
 	int stride = (RAW_W * 3 / 2 + 15) / 16 * 16;
@@ -333,7 +334,7 @@ int main(int argc, char **argv)
 	long long bytes = 0;
 	off_t in_frames = 0;
 
-	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jQ:")) != -1) {
+	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jQ:b:")) != -1) {
 		switch (opt) {
 		case 'c': cam_dev = optarg; break;
 		case 'i': in_file = optarg; break;
@@ -346,11 +347,12 @@ int main(int argc, char **argv)
 		case 'y': yuv_file = optarg; break;
 		case 'j': jpeg = 1; break;
 		case 'Q': quality = atoi(optarg); break;
+		case 'b': cap_size = strtoul(optarg, NULL, 0); break;
 		default:
 			fprintf(stderr, "usage: %s -c /dev/videoN | -i cap.raw "
 				"[-e enc] [-o out.h264] [-n frames] [-q qp] "
 				"[-g gop] [-s saturation] [-y out.nv12] "
-				"[-j] [-Q quality]\n",
+				"[-j] [-Q quality] [-b bytes]\n",
 				argv[0]);
 			return 1;
 		}
@@ -430,7 +432,7 @@ int main(int argc, char **argv)
 		 * larger frame stalls the encoder until the 1 s timeout, and
 		 * the driver returns it cut short.
 		 */
-		f.fmt.pix.sizeimage = nv12_size;
+		f.fmt.pix.sizeimage = cap_size ? cap_size : nv12_size;
 		xioctl(efd, VIDIOC_S_FMT, &f, "encoder CAPTURE VIDIOC_S_FMT");
 
 		/* The JPEG encoder has no frame rate */
@@ -553,6 +555,13 @@ int main(int argc, char **argv)
 			break;
 		}
 		if (write(ofd, ecap[i].p, used) != (ssize_t)used)
+			die("write");
+		/*
+		 * An access unit delimiter ends the picture: a stream reader
+		 * can then send it at once, not at the next picture.
+		 */
+		if (!jpeg && ofd == STDOUT_FILENO &&
+		    write(ofd, "\0\0\0\1\x09\xf0", 6) != 6)
 			die("write");
 		bytes += used;
 		qbuf(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, i, 0);
