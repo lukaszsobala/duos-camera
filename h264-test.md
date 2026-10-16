@@ -95,13 +95,15 @@ one 0920 serves both patch directories.
 
 ## If a step fails
 
-- Step 1, `firmware request failed`: the file name or place is wrong.
+- Step 1, `firmware request failed`: the file name or place is wrong. After
+  you copy the file, reload the driver: `modprobe -r coda_vpu; modprobe
+  coda_vpu`. Or reboot.
 - Step 1, `firmware get command error`: the BIT processor does not start.
   Report the whole `dmesg | grep -i -e coda -e vpu`.
 - Step 2 hangs or fails: turn on the driver's debug output, then run step 2
   again and report `dmesg`:
 
-      echo 1 > /sys/module/coda/parameters/coda_debug
+      echo 1 > /sys/module/coda_vpu/parameters/coda_debug
 
 - Step 2 gives a stream with wrong colours, but `-y a.nv12` gives correct
   frames: the encoder reads the frames wrongly. The frame memory control
