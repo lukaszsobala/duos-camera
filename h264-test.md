@@ -43,10 +43,10 @@ one 0920 serves both patch directories.
 
        overlays=camera-j1-gc2083 video-codec
 
-4. Copy `cam2h264` and `mjpeg-http` (built on the PC, see
-   [tools/README.md](tools/README.md)), `j1-stream.sh`, `j1-h264.sh` and
-   `j1-http.sh` to one directory. Copy a raw capture
-   too, for example `cap.raw`.
+4. Copy `cam2h264.c`, `mjpeg-http.c`, `j1-stream.sh`, `j1-h264.sh` and
+   `j1-http.sh` to one directory, and build the two programs there (see
+   [tools/README.md](tools/README.md)). Copy a raw capture too, for example
+   `cap.raw`.
 5. Reboot.
 
 ## Steps

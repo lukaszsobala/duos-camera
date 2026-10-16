@@ -58,11 +58,16 @@ it with the SG2000's CODA980 (H.264), or with `-j` its JPEG unit (motion
 JPEG). See [../h264-test.md](../h264-test.md) for the kernel, overlay and
 firmware.
 
-Build it on the PC (static, so the board's libc does not matter):
+Build it on the board:
 
-    riscv64-linux-gnu-gcc -O2 -static -o cam2h264 cam2h264.c -lm
+    apt install gcc libc6-dev
+    gcc -O2 -o cam2h264 cam2h264.c -lm
 
-Copy `cam2h264`, `j1-stream.sh` and `j1-h264.sh` to one directory on the
+Do not cross-build on an Ubuntu 26.04 PC. Its `riscv64-linux-gnu-gcc` and
+static libc target RVA23 (vector 1.0, Zba/Zbb). The SG2000's C906 is
+rv64gc: the binary stops with `Illegal instruction`.
+
+Put `cam2h264`, `j1-stream.sh` and `j1-h264.sh` in one directory on the
 board. Then:
 
     GAIN=256 ./j1-h264.sh 300            # 300 frames to out.h264
@@ -89,12 +94,12 @@ cell, gray-world white balance and exposure, and no colour matrix.
 ## mjpeg-http: live view in a browser
 
 `mjpeg-http` reads motion JPEG on stdin and serves it over HTTP as
-`multipart/x-mixed-replace`, the usual IP camera format. Build it like
-`cam2h264`:
+`multipart/x-mixed-replace`, the usual IP camera format. Build it on the
+board, like `cam2h264`:
 
-    riscv64-linux-gnu-gcc -O2 -static -o mjpeg-http mjpeg-http.c
+    gcc -O2 -o mjpeg-http mjpeg-http.c
 
-Copy it next to `cam2h264`, `j1-stream.sh` and `j1-h264.sh`, with
+Put it next to `cam2h264`, `j1-stream.sh` and `j1-h264.sh`, with
 `j1-http.sh`. On the board:
 
     GAIN=256 ./j1-http.sh            # PORT=n to change port 8080
