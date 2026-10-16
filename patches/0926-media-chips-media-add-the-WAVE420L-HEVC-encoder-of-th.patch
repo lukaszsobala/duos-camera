@@ -22,8 +22,8 @@ Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
  drivers/media/platform/chips-media/Makefile   |    1 +
  .../media/platform/chips-media/wave4/Kconfig  |   14 +
  .../media/platform/chips-media/wave4/Makefile |    2 +
- .../platform/chips-media/wave4/wave420l.c     | 1594 +++++++++++++++++
- 5 files changed, 1612 insertions(+)
+ .../platform/chips-media/wave4/wave420l.c     | 1596 +++++++++++++++++
+ 5 files changed, 1614 insertions(+)
  create mode 100644 drivers/media/platform/chips-media/wave4/Kconfig
  create mode 100644 drivers/media/platform/chips-media/wave4/Makefile
  create mode 100644 drivers/media/platform/chips-media/wave4/wave420l.c
@@ -78,10 +78,10 @@ index 0000000..a12b291
 +obj-$(CONFIG_VIDEO_WAVE420L) += wave420l.o
 diff --git a/drivers/media/platform/chips-media/wave4/wave420l.c b/drivers/media/platform/chips-media/wave4/wave420l.c
 new file mode 100644
-index 0000000..b747c21
+index 0000000..39a3bbc
 --- /dev/null
 +++ b/drivers/media/platform/chips-media/wave4/wave420l.c
-@@ -0,0 +1,1594 @@
+@@ -0,0 +1,1596 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Chips&Media WAVE420L HEVC encoder, as in the Sophgo SG2000
@@ -296,8 +296,9 @@ index 0000000..b747c21
 +#define W4_REFRESH_IDR			2
 +#define W4_PIC_TYPE_IDR			3
 +
-+#define W4_CODE_BUF_SIZE		SZ_256K
-+#define W4_TEMP_BUF_SIZE		SZ_512K
++/* The Chips&Media sizes: Sophgo's 256 KiB code window is not enough */
++#define W4_CODE_BUF_SIZE		SZ_1M
++#define W4_TEMP_BUF_SIZE		SZ_1M
 +#define W4_WORK_BUF_SIZE		SZ_128K
 +#define W4_HDR_BUF_SIZE			SZ_64K
 +#define W4_MAX_INSTANCES		4
@@ -628,11 +629,12 @@ index 0000000..b747c21
 +	memcpy(dev->common.vaddr, fw->data, fw->size);
 +	dev_info(dev->dev, "loaded %s, %zu bytes\n", w4_fw_names[i], fw->size);
 +	release_firmware(fw);
-+	/* The remap window is one 256 KiB page */
++	/* The remap window covers the code buffer: keep it aligned */
 +	if (dev->common.dma & (W4_CODE_BUF_SIZE - 1))
-+		dev_warn(dev->dev, "code buffer at %pad: not 256 KiB aligned\n",
++		dev_warn(dev->dev, "code buffer at %pad: not aligned to its size\n",
 +			 &dev->common.dma);
-+	w4_dbg(dev, "code at %pad, temp at code + 256 KiB\n", &dev->common.dma);
++	w4_dbg(dev, "code at %pad, temp at code + %u KiB\n", &dev->common.dma,
++	       W4_CODE_BUF_SIZE / SZ_1K);
 +
 +	w4_claim_sram(dev);
 +
@@ -1049,7 +1051,7 @@ index 0000000..b747c21
 +	w4_write(dev, 0, W4_ENC_SRC_PIC_IDX);
 +	w4_write(dev, y, W4_ENC_SRC_ADDR_Y);
 +	w4_write(dev, c, W4_ENC_SRC_ADDR_U);
-+	w4_write(dev, c, W4_ENC_SRC_ADDR_V);
++	w4_write(dev, ~0U, W4_ENC_SRC_ADDR_V);	/* no V plane */
 +	w4_write(dev, src_q->bytesperline << 16 | src_q->bytesperline,
 +		 W4_ENC_SRC_STRIDE);
 +	/* NV12: CbCr interleaved; 8 bit, left justified; endian */

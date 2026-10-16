@@ -18,7 +18,7 @@ cores share the SRAM. Patch 0927 adds the H.265 node to
 Build fork, local branch `duos-coda980`, commit "sophgo-sg200x: add the
 WAVE420L H.265 encoder". Driver source: `~/Software/armbian/linux-gc2083`,
 branch `wave420l`. The kernel debs are in `output/debs/`, built on
-2026-10-16 23:46, hash part `P49af` (`linux-image-edge-sophgo-sg200x-riscv64_*`
+2026-10-17 00:08, hash part `P7372` (`linux-image-edge-sophgo-sg200x-riscv64_*`
 and `linux-dtb-edge-sophgo-sg200x-riscv64_*`), version 7.2.11.
 
 ## Board setup
@@ -175,3 +175,18 @@ Next kernel (P49af): coda takes the SRAM before each command. The
 `sram_share` parameter of wave420l sets the switch value;
 `tools/w4-sram-sweep.sh` tries 2, 0, 1, 3 and -1 (no write), each with and
 without the line buffers in the SRAM.
+
+### 2026-10-16/17, kernel P49af
+
+- H.264 works before and after H.265 hangs: coda's SRAM claim per command
+  fixes that.
+- SRAM switch: with 2 the firmware boots and ENC_PIC hangs. With 0, 1, 3
+  or no write, INIT_VPU times out. The H.265 core needs the SRAM to boot;
+  2 is right.
+- Codec clocks lowered by hand (0x030020e4, 0x030020ec) to 300/343 MHz and
+  225/257 MHz: still hangs. The FSBL sets 450/515 MHz (overdrive, 1.00 V).
+- StarFive firmware (firmware version 196485): same hang, same PC.
+
+Next kernel (P7372): 1 MiB code window and 1 MiB temp buffer, like the
+Chips&Media package and the Amlogic driver. Sophgo uses 256 KiB and
+512 KiB.
