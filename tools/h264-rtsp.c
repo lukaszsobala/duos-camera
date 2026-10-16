@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Serve an H.264 stream from stdin over RTSP.
+ * Serve an H.264 or H.265 stream from stdin over RTSP.
  *
  *   cam2h264 -c /dev/videoN -n 0 -o - | h264-rtsp [-p port]
+ *   cam2h264 -c /dev/videoN -n 0 -x -o - | h264-rtsp -H [-p port]
  *
  * Play rtsp://<board>:8554/ in VLC, ffplay, mpv or Home Assistant.
  *
- * The input is an Annex B stream with one slice per picture, as coda
- * writes it. RTP (RFC 6184, packetization mode 1) goes over the RTSP
- * connection (RFC 2326, section 10.12). A client that asks for UDP gets
- * 461 Unsupported Transport, and then retries over TCP.
+ * The input is an Annex B stream with one slice per picture, as coda and
+ * the WAVE420L write it. RTP (RFC 6184, packetization mode 1; RFC 7798
+ * for H.265) goes over the RTSP connection (RFC 2326, section 10.12). A
+ * client that asks for UDP gets 461 Unsupported Transport, and then
+ * retries over TCP.
  *
  * A client starts at the next IDR picture. A client that falls behind
  * skips to the next IDR picture. It does not slow the camera or the other
@@ -56,8 +58,26 @@ struct client {
 static struct client cl[MAX_CLIENTS];
 static uint8_t in[MAX_INPUT];
 static size_t in_len;
-static uint8_t sps[256], pps[256];
-static size_t sps_len, pps_len;
+static uint8_t vps[256], sps[256], pps[256];
+static size_t vps_len, sps_len, pps_len;
+/* H.265 instead of H.264 */
+static int hevc;
+
+static int nal_type(const uint8_t *n)
+{
+	return hevc ? (n[0] >> 1) & 0x3f : n[0] & 0x1f;
+}
+
+static int is_vcl(int type)
+{
+	return hevc ? type < 32 : type == 1 || type == 5;
+}
+
+/* IDR picture; for H.265 any IRAP picture: BLA, IDR or CRA */
+static int is_idr(int type)
+{
+	return hevc ? type >= 16 && type <= 21 : type == 5;
+}
 /* The NAL units of one picture, each after its 4-byte length */
 static uint8_t au[MAX_AU];
 static size_t au_len;
@@ -129,27 +149,37 @@ static void rtp_packet(struct client *c, uint32_t ts, int marker,
 	out_put(c, p, plen);
 }
 
-/* One NAL unit: a single packet, or FU-A fragments */
+/*
+ * One NAL unit: a single packet, or fragments: FU-A (H.264, a 1-byte NAL
+ * header) or FU (H.265, a 2-byte NAL header).
+ */
 static void rtp_nal(struct client *c, uint32_t ts, int last,
 		    const uint8_t *n, size_t len)
 {
-	uint8_t fu[2];
+	size_t nh = hevc ? 2 : 1, fh = nh + 1;
+	uint8_t fu[3], *s;
 
 	if (len <= MAX_PAYLOAD) {
 		rtp_packet(c, ts, last, NULL, 0, n, len);
 		return;
 	}
-	fu[0] = (n[0] & 0xe0) | 28;
-	fu[1] = 0x80 | (n[0] & 0x1f);
-	n++;
-	len--;
+	if (hevc) {
+		fu[0] = (n[0] & 0x81) | 49 << 1;
+		fu[1] = n[1];
+	} else {
+		fu[0] = (n[0] & 0xe0) | 28;
+	}
+	s = &fu[nh];
+	*s = 0x80 | nal_type(n);
+	n += nh;
+	len -= nh;
 	while (len) {
-		size_t k = len > MAX_PAYLOAD - 2 ? MAX_PAYLOAD - 2 : len;
+		size_t k = len > MAX_PAYLOAD - fh ? MAX_PAYLOAD - fh : len;
 
 		if (k == len)
-			fu[1] |= 0x40;
-		rtp_packet(c, ts, last && k == len, fu, 2, n, k);
-		fu[1] &= ~0x80;
+			*s |= 0x40;
+		rtp_packet(c, ts, last && k == len, fu, fh, n, k);
+		*s &= ~0x80;
 		n += k;
 		len -= k;
 	}
@@ -163,15 +193,17 @@ static uint32_t au_nal_len(size_t p)
 
 static void queue_au(struct client *c, uint32_t ts, int idr, int has_ps)
 {
-	size_t p, need = au_len + sps_len + pps_len +
-		(au_len / (MAX_PAYLOAD - 2) + 8) * 18;
+	size_t p, need = au_len + vps_len + sps_len + pps_len +
+		(au_len / (MAX_PAYLOAD - 3) + 8) * 19;
 
 	if (out_reserve(c, need) < 0) {
 		c->need_idr = 1;
 		return;
 	}
 	/* Some encoders put SPS and PPS before the first IDR picture only */
-	if (idr && !has_ps && sps_len && pps_len) {
+	if (idr && !has_ps && sps_len && pps_len && (!hevc || vps_len)) {
+		if (hevc)
+			rtp_nal(c, ts, 0, vps, vps_len);
 		rtp_nal(c, ts, 0, sps, sps_len);
 		rtp_nal(c, ts, 0, pps, pps_len);
 	}
@@ -191,10 +223,10 @@ static void flush_au(void)
 	size_t p;
 
 	for (p = 0; p < au_len; p += 4 + au_nal_len(p)) {
-		int type = au[p + 4] & 0x1f;
+		int type = nal_type(au + p + 4);
 
-		idr |= type == 5;
-		has_ps |= type == 7;
+		idr |= is_idr(type);
+		has_ps |= type == (hevc ? 33 : 7);
 	}
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	ts = ts_base + (uint32_t)((uint64_t)t.tv_sec * 90000 +
@@ -219,16 +251,21 @@ static void handle_nal(const uint8_t *n, size_t len)
 {
 	int type;
 
-	if (!len)
+	if (len < 2)
 		return;
-	type = n[0] & 0x1f;
-	if (type == 9 || type == 12)	/* access unit delimiter, filler */
+	type = nal_type(n);
+	/* Access unit delimiter, filler */
+	if (type == (hevc ? 35 : 9) || type == (hevc ? 38 : 12))
 		return;
-	if (type == 7 && len <= sizeof(sps)) {
+	if (hevc && type == 32 && len <= sizeof(vps)) {
+		memcpy(vps, n, len);
+		vps_len = len;
+	}
+	if (type == (hevc ? 33 : 7) && len <= sizeof(sps)) {
 		memcpy(sps, n, len);
 		sps_len = len;
 	}
-	if (type == 8 && len <= sizeof(pps)) {
+	if (type == (hevc ? 34 : 8) && len <= sizeof(pps)) {
 		memcpy(pps, n, len);
 		pps_len = len;
 	}
@@ -242,7 +279,7 @@ static void handle_nal(const uint8_t *n, size_t len)
 	au[au_len++] = len;
 	memcpy(au + au_len, n, len);
 	au_len += len;
-	if (type == 1 || type == 5)	/* one slice per picture */
+	if (is_vcl(type))		/* one slice per picture */
 		flush_au();
 }
 
@@ -369,24 +406,31 @@ static void base64(const uint8_t *d, size_t len, char *out)
 
 static void describe(struct client *c, const char *url, const char *cseq)
 {
-	char sdp[2048], fmtp[1024] = "", extra[1024];
+	char sdp[3072], fmtp[1536] = "", extra[1024];
+	char v64[sizeof(vps) * 4 / 3 + 4];
 	char s64[sizeof(sps) * 4 / 3 + 4], p64[sizeof(pps) * 4 / 3 + 4];
 
-	/* Without SPS and PPS yet, the client takes them from the stream */
-	if (sps_len >= 4 && pps_len) {
-		base64(sps, sps_len, s64);
-		base64(pps, pps_len, p64);
+	/* Without the parameter sets, the client takes them from the stream */
+	base64(vps, vps_len, v64);
+	base64(sps, sps_len, s64);
+	base64(pps, pps_len, p64);
+	if (!hevc && sps_len >= 4 && pps_len)
 		snprintf(fmtp, sizeof(fmtp),
-			 ";profile-level-id=%02X%02X%02X;sprop-parameter-sets=%s,%s",
-			 sps[1], sps[2], sps[3], s64, p64);
-	}
+			 "a=fmtp:%d packetization-mode=1;profile-level-id=%02X%02X%02X;sprop-parameter-sets=%s,%s\r\n",
+			 PT, sps[1], sps[2], sps[3], s64, p64);
+	else if (!hevc)
+		snprintf(fmtp, sizeof(fmtp),
+			 "a=fmtp:%d packetization-mode=1\r\n", PT);
+	else if (vps_len && sps_len && pps_len)
+		snprintf(fmtp, sizeof(fmtp),
+			 "a=fmtp:%d sprop-vps=%s;sprop-sps=%s;sprop-pps=%s\r\n",
+			 PT, v64, s64, p64);
 	snprintf(sdp, sizeof(sdp),
 		 "v=0\r\no=- %u 1 IN IP4 0.0.0.0\r\ns=Milk-V Duo S camera\r\n"
 		 "c=IN IP4 0.0.0.0\r\nt=0 0\r\na=control:*\r\n"
 		 "a=range:npt=0-\r\nm=video 0 RTP/AVP %d\r\n"
-		 "a=rtpmap:%d H264/90000\r\n"
-		 "a=fmtp:%d packetization-mode=1%s\r\na=control:track1\r\n",
-		 session, PT, PT, PT, fmtp);
+		 "a=rtpmap:%d %s/90000\r\n%sa=control:track1\r\n",
+		 session, PT, PT, hevc ? "H265" : "H264", fmtp);
 	snprintf(extra, sizeof(extra),
 		 "Content-Type: application/sdp\r\nContent-Base: %s%s\r\n", url,
 		 url[strlen(url) - 1] == '/' ? "" : "/");
@@ -514,12 +558,16 @@ int main(int argc, char **argv)
 	struct pollfd pfd[MAX_CLIENTS + 2];
 	int port = 8554, lfd, opt, i, one = 1, zero = 0;
 
-	while ((opt = getopt(argc, argv, "p:")) != -1) {
-		if (opt != 'p') {
-			fprintf(stderr, "usage: ... | %s [-p port]\n", argv[0]);
+	while ((opt = getopt(argc, argv, "Hp:")) != -1) {
+		if (opt == 'H') {
+			hevc = 1;
+		} else if (opt == 'p') {
+			port = atoi(optarg);
+		} else {
+			fprintf(stderr, "usage: ... | %s [-H] [-p port]\n",
+				argv[0]);
 			return 1;
 		}
-		port = atoi(optarg);
 	}
 	signal(SIGPIPE, SIG_IGN);
 	srandom(time(NULL) ^ getpid());
@@ -543,7 +591,8 @@ int main(int argc, char **argv)
 		perror("bind");
 		return 1;
 	}
-	fprintf(stderr, "h264-rtsp: rtsp://<board>:%d/\n", port);
+	fprintf(stderr, "h264-rtsp: %s, rtsp://<board>:%d/\n",
+		hevc ? "H.265" : "H.264", port);
 
 	for (;;) {
 		int n = 2;

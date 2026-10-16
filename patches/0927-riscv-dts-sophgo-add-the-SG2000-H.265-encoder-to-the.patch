@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Lukasz Sobala <lsobala1@gmail.com>
+Date: Fri, 16 Oct 2026 18:50:59 +0200
+Subject: [PATCH] riscv: dts: sophgo: add the SG2000 H.265 encoder to the codec
+ overlay
+
+Add the WAVE420L H.265 encoder to overlays=video-codec. The arm64
+overlay includes this file, so it gets the node too.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../sophgo/overlay/sg2000-video-codec.dtso    | 22 ++++++++++++++-----
+ 1 file changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/arch/riscv/boot/dts/sophgo/overlay/sg2000-video-codec.dtso b/arch/riscv/boot/dts/sophgo/overlay/sg2000-video-codec.dtso
+index a7133b5..44cdb05 100644
+--- a/arch/riscv/boot/dts/sophgo/overlay/sg2000-video-codec.dtso
++++ b/arch/riscv/boot/dts/sophgo/overlay/sg2000-video-codec.dtso
+@@ -1,12 +1,11 @@
+ // SPDX-License-Identifier: (GPL-2.0 OR MIT)
+ /*
+- * The SG2000 H.264 encoder, a Chips&Media CODA980, and its JPEG unit.
++ * The SG2000 codecs: the H.264 encoder (a Chips&Media CODA980), the
++ * JPEG unit, and the H.265 encoder (a Chips&Media WAVE420L).
+  *
+  * Enable with overlays=video-codec in /boot/armbianEnv.txt. The H.264
+- * driver loads the vendor firmware from /lib/firmware/coda980.bin. The
+- * JPEG unit needs no firmware.
+- *
+- * The H.265 encoder (WAVE420L) is not in this overlay.
++ * and H.265 drivers load the vendor firmware from /lib/firmware:
++ * coda980.bin and monet.bin. The JPEG unit needs no firmware.
+  */
+ /dts-v1/;
+ /plugin/;
+@@ -51,4 +50,17 @@
+ 		clock-names = "per", "ahb", "axi", "src", "cfg";
+ 		resets = <&rst RST_JPEG>;
+ 	};
++
++	video-codec@b020000 {
++		compatible = "sophgo,sg2000-wave420l";
++		/* The WAVE420L, and the control block that the codecs share */
++		reg = <0x0b020000 0x10000>, <0x0b030000 0x100>;
++		reg-names = "regs", "ctrl";
++		interrupt-parent = <SOC_INTC>;
++		interrupts = <SOC_PERIPHERAL_IRQ(6) IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&clk CLK_H265C>, <&clk CLK_APB_H265C>,
++			 <&clk CLK_AXI_VIDEO_CODEC>, <&clk CLK_VC_SRC0>,
++			 <&clk CLK_CFG_REG_VC>;
++		clock-names = "core", "apb", "axi", "src", "cfg";
++	};
+ };

@@ -51,11 +51,12 @@ v4l2-ctl prints the frame rate. In a second `screen` window, run `top -d 1`.
 The frames go to memory by DMA, so the CPU load should stay low. To count the
 frame interrupts, compare `grep -e csi -e video-input /proc/interrupts` twice.
 
-## Encode to H.264 or motion JPEG (on the board)
+## Encode to H.264, H.265 or motion JPEG (on the board)
 
 `cam2h264` converts each raw frame to 960x540 NV12 on the CPU and encodes
-it with the SG2000's CODA980 (H.264), or with `-j` its JPEG unit (motion
-JPEG). See [../h264-test.md](../h264-test.md) for the kernel, overlay and
+it with the SG2000's CODA980 (H.264), with `-x` its WAVE420L (H.265), or
+with `-j` its JPEG unit (motion JPEG). See [../h264-test.md](../h264-test.md)
+and [../h265-test.md](../h265-test.md) for the kernel, overlay and
 firmware.
 
 Build it on the board:
@@ -76,6 +77,7 @@ board. Then:
     GAIN=256 ./j1-h264.sh 300            # 300 frames to out.h264
     ./cam2h264 -i cap.raw -n 60          # from a raw capture, no camera
     ./cam2h264 -i cap.raw -n 4 -y a.nv12 # conversion only, no encoder
+    GAIN=256 ./j1-h264.sh 300 -x         # H.265 to out.h265
     GAIN=256 ./j1-h264.sh 300 -j         # motion JPEG to out.mjpeg
     ./cam2h264 -i cap.raw -n 1 -j -o a.jpg  # one JPEG
 
@@ -119,10 +121,10 @@ counts the bytes still in the socket buffer, so the delay stays short on a
 slow link. The server has no authentication: everyone on the network can
 watch.
 
-## h264-rtsp: H.264 live view over RTSP
+## h264-rtsp: H.264 and H.265 live view over RTSP
 
-`h264-rtsp` reads H.264 on stdin and serves it over RTSP, the usual IP
-camera protocol. It uses about a fifth of the MJPEG bandwidth. Browsers do
+`h264-rtsp` reads H.264, or H.265 with `-H`, on stdin and serves it over
+RTSP, the usual IP camera protocol. It uses about a fifth of the MJPEG bandwidth. Browsers do
 not play RTSP: use VLC, ffplay, mpv, or Home Assistant. Build it on the
 board:
 
@@ -132,6 +134,7 @@ Put it next to `cam2h264`, `j1-stream.sh` and `j1-h264.sh`, with
 `j1-rtsp.sh`. On the board:
 
     GAIN=256 ./j1-rtsp.sh            # PORT=n to change port 8554
+    GAIN=256 ./j1-rtsp.sh -x         # H.265
 
 Then on the PC:
 

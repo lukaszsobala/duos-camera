@@ -1,19 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * cam2h264: GC2083 raw frames -> half-size NV12 -> CODA980 H.264, or
- * -> JPU motion JPEG with -j.
+ * -> WAVE420L H.265 with -x, or -> JPU motion JPEG with -j.
  *
  *   cam2h264 -c /dev/videoN [options]   from the camera (cv1800-vi-raw)
  *   cam2h264 -i cap.raw [options]       from a file of raw frames
  *
  * Options:
- *   -e DEV   encoder (default: the device named coda-video-encoder, or
- *            coda-jpeg-encoder with -j)
- *   -o FILE  output H.264 Annex B stream, or concatenated JPEG frames with
- *            -j (default out.h264, out.mjpeg)
+ *   -e DEV   encoder (default: the device named coda-video-encoder,
+ *            wave420l-encoder with -x, coda-jpeg-encoder with -j)
+ *   -o FILE  output H.264 or H.265 Annex B stream, or concatenated JPEG
+ *            frames with -j (default out.h264, out.h265, out.mjpeg)
  *   -n N     frames to encode, 0 = until Ctrl-C (default 300)
  *   -q QP    constant QP, 0-51 (default 30)
  *   -g N     GOP size (default 30)
+ *   -x       H.265 with the WAVE420L, instead of H.264
  *   -j       motion JPEG with the JPEG unit, instead of H.264
  *   -Q N     JPEG quality, 5-100 (default 85)
  *   -s F     colour saturation (default 1.5)
@@ -322,6 +323,7 @@ int main(int argc, char **argv)
 	const char *yuv_file = NULL;
 	char enc_dev[300] = "";
 	int frames = 300, qp = 30, gop = 30, sat = 384, jpeg = 0, quality = 85;
+	int hevc = 0;
 	size_t cap_size = 0;
 	const char *enc_name;
 	struct buf cam[NBUF_CAM], eout[NBUF_ENC_OUT], ecap[NBUF_ENC_CAP];
@@ -334,7 +336,7 @@ int main(int argc, char **argv)
 	long long bytes = 0;
 	off_t in_frames = 0;
 
-	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jQ:b:")) != -1) {
+	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:")) != -1) {
 		switch (opt) {
 		case 'c': cam_dev = optarg; break;
 		case 'i': in_file = optarg; break;
@@ -346,13 +348,14 @@ int main(int argc, char **argv)
 		case 's': sat = (int)(atof(optarg) * 256); break;
 		case 'y': yuv_file = optarg; break;
 		case 'j': jpeg = 1; break;
+		case 'x': hevc = 1; break;
 		case 'Q': quality = atoi(optarg); break;
 		case 'b': cap_size = strtoul(optarg, NULL, 0); break;
 		default:
 			fprintf(stderr, "usage: %s -c /dev/videoN | -i cap.raw "
 				"[-e enc] [-o out.h264] [-n frames] [-q qp] "
 				"[-g gop] [-s saturation] [-y out.nv12] "
-				"[-j] [-Q quality] [-b bytes]\n",
+				"[-x] [-j] [-Q quality] [-b bytes]\n",
 				argv[0]);
 			return 1;
 		}
@@ -361,12 +364,17 @@ int main(int argc, char **argv)
 		fprintf(stderr, "give -c or -i\n");
 		return 1;
 	}
-	enc_name = jpeg ? "coda-jpeg-encoder" : "coda-video-encoder";
-	if (jpeg && !strcmp(out_file, "out.h264"))
-		out_file = "out.mjpeg";
+	if (jpeg && hevc) {
+		fprintf(stderr, "give -j or -x, not both\n");
+		return 1;
+	}
+	enc_name = jpeg ? "coda-jpeg-encoder" :
+		   hevc ? "wave420l-encoder" : "coda-video-encoder";
+	if (!strcmp(out_file, "out.h264") && (jpeg || hevc))
+		out_file = jpeg ? "out.mjpeg" : "out.h265";
 	if (!yuv_file && !enc_dev[0] &&
 	    !find_encoder(enc_name, enc_dev, sizeof(enc_dev))) {
-		fprintf(stderr, "no %s device; is coda loaded?\n", enc_name);
+		fprintf(stderr, "no %s device; is the driver loaded?\n", enc_name);
 		return 1;
 	}
 
@@ -426,7 +434,8 @@ int main(int argc, char **argv)
 		f.fmt.pix.width = OUT_W;
 		f.fmt.pix.height = OUT_H;
 		f.fmt.pix.pixelformat = jpeg ? V4L2_PIX_FMT_JPEG :
-					       V4L2_PIX_FMT_H264;
+				       hevc ? V4L2_PIX_FMT_HEVC :
+					      V4L2_PIX_FMT_H264;
 		/*
 		 * Without a size, coda allocates 1 bit per pixel (64 KiB). A
 		 * larger frame stalls the encoder until the 1 s timeout, and
@@ -444,7 +453,13 @@ int main(int argc, char **argv)
 	if (efd >= 0 && jpeg)
 		set_ctrl(efd, V4L2_CID_JPEG_COMPRESSION_QUALITY, quality,
 			 "JPEG quality");
-	if (efd >= 0 && !jpeg) {
+	if (efd >= 0 && hevc) {
+		set_ctrl(efd, V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP, qp,
+			 "I frame QP");
+		set_ctrl(efd, V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP, qp,
+			 "P frame QP");
+		set_ctrl(efd, V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop, "GOP size");
+	} else if (efd >= 0 && !jpeg) {
 		set_ctrl(efd, V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP, qp,
 			 "I frame QP");
 		set_ctrl(efd, V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP, qp,
@@ -561,7 +576,8 @@ int main(int argc, char **argv)
 		 * can then send it at once, not at the next picture.
 		 */
 		if (!jpeg && ofd == STDOUT_FILENO &&
-		    write(ofd, "\0\0\0\1\x09\xf0", 6) != 6)
+		    (hevc ? write(ofd, "\0\0\0\1\x46\x01\x50", 7) != 7 :
+			    write(ofd, "\0\0\0\1\x09\xf0", 6) != 6))
 			die("write");
 		bytes += used;
 		qbuf(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, i, 0);

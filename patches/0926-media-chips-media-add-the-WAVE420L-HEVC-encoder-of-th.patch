@@ -1,0 +1,1516 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Lukasz Sobala <lsobala1@gmail.com>
+Date: Fri, 16 Oct 2026 18:50:41 +0200
+Subject: [PATCH] media: chips-media: add the WAVE420L HEVC encoder of the
+ Sophgo SG2000
+
+The SG2000 has a Chips&Media WAVE420L HEVC encoder. Its host interface
+is the WAVE4 one: the boot and remap registers are the WAVE5 ones, but
+the commands and the command registers are different.
+
+Add a V4L2 mem2mem encoder: NV12 in, HEVC Main out, at constant QP,
+with an IDR picture every GOP. The secondary AXI (the codec SRAM) is not
+used. The driver loads the vendor firmware, monet.bin.
+
+The register sequence follows Sophgo's vendor driver.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
+---
+ drivers/media/platform/chips-media/Kconfig    |    1 +
+ drivers/media/platform/chips-media/Makefile   |    1 +
+ .../media/platform/chips-media/wave4/Kconfig  |   14 +
+ .../media/platform/chips-media/wave4/Makefile |    2 +
+ .../platform/chips-media/wave4/wave420l.c     | 1433 +++++++++++++++++
+ 5 files changed, 1451 insertions(+)
+ create mode 100644 drivers/media/platform/chips-media/wave4/Kconfig
+ create mode 100644 drivers/media/platform/chips-media/wave4/Makefile
+ create mode 100644 drivers/media/platform/chips-media/wave4/wave420l.c
+
+diff --git a/drivers/media/platform/chips-media/Kconfig b/drivers/media/platform/chips-media/Kconfig
+index ad350eb..9c5c106 100644
+--- a/drivers/media/platform/chips-media/Kconfig
++++ b/drivers/media/platform/chips-media/Kconfig
+@@ -3,4 +3,5 @@
+ comment "Chips&Media media platform drivers"
+ 
+ source "drivers/media/platform/chips-media/coda/Kconfig"
++source "drivers/media/platform/chips-media/wave4/Kconfig"
+ source "drivers/media/platform/chips-media/wave5/Kconfig"
+diff --git a/drivers/media/platform/chips-media/Makefile b/drivers/media/platform/chips-media/Makefile
+index 6b5d99d..523a551 100644
+--- a/drivers/media/platform/chips-media/Makefile
++++ b/drivers/media/platform/chips-media/Makefile
+@@ -1,4 +1,5 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ 
+ obj-y += coda/
++obj-y += wave4/
+ obj-y += wave5/
+diff --git a/drivers/media/platform/chips-media/wave4/Kconfig b/drivers/media/platform/chips-media/wave4/Kconfig
+new file mode 100644
+index 0000000..0ed1d22
+--- /dev/null
++++ b/drivers/media/platform/chips-media/wave4/Kconfig
+@@ -0,0 +1,14 @@
++# SPDX-License-Identifier: GPL-2.0-only
++config VIDEO_WAVE420L
++	tristate "Chips&Media WAVE420L HEVC encoder"
++	depends on V4L_MEM2MEM_DRIVERS
++	depends on VIDEO_DEV && OF
++	depends on ARCH_SOPHGO || COMPILE_TEST
++	select VIDEOBUF2_DMA_CONTIG
++	select V4L2_MEM2MEM_DEV
++	help
++	  The Chips&Media WAVE420L HEVC encoder in the Sophgo SG2000.
++	  It needs the vendor firmware, monet.bin.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called wave420l.
+diff --git a/drivers/media/platform/chips-media/wave4/Makefile b/drivers/media/platform/chips-media/wave4/Makefile
+new file mode 100644
+index 0000000..a12b291
+--- /dev/null
++++ b/drivers/media/platform/chips-media/wave4/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0-only
++obj-$(CONFIG_VIDEO_WAVE420L) += wave420l.o
+diff --git a/drivers/media/platform/chips-media/wave4/wave420l.c b/drivers/media/platform/chips-media/wave4/wave420l.c
+new file mode 100644
+index 0000000..5ca7094
+--- /dev/null
++++ b/drivers/media/platform/chips-media/wave4/wave420l.c
+@@ -0,0 +1,1433 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Chips&Media WAVE420L HEVC encoder, as in the Sophgo SG2000
++ *
++ * NV12 in, HEVC Main out, at constant QP, with an IDR picture every GOP.
++ * The secondary AXI (the codec SRAM) is not used.
++ *
++ * The firmware and the register sequence come from Sophgo's vendor driver
++ * (duo-buildroot-sdk-v2, osdrv/interdrv/cvi_vc_drv/vcodec/vpuapi/wave).
++ */
++
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/firmware.h>
++#include <linux/idr.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <linux/workqueue.h>
++
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-event.h>
++#include <media/v4l2-ioctl.h>
++#include <media/v4l2-mem2mem.h>
++#include <media/videobuf2-dma-contig.h>
++
++#define W4_NAME			"wave420l"
++
++/* Host interface */
++#define W4_PO_CONF			0x0000
++#define W4_VPU_VINT_REASON_CLR		0x0034
++#define W4_VPU_HOST_INT_REQ		0x0038
++#define W4_VPU_VINT_CLEAR		0x003c
++#define W4_VPU_VPU_INT_STS		0x0044
++#define W4_VPU_VINT_ENABLE		0x0048
++#define W4_VPU_VINT_REASON		0x004c
++#define W4_VPU_RESET_REQ		0x0050
++#define W4_VPU_RESET_STATUS		0x0054
++#define W4_VPU_REMAP_CTRL		0x0060
++#define W4_VPU_REMAP_VADDR		0x0064
++#define W4_VPU_REMAP_PADDR		0x0068
++#define W4_VPU_REMAP_CORE_START		0x006c
++#define W4_VPU_BUSY_STATUS		0x0070
++#define W4_PRODUCT_NUMBER		0x1044
++
++/* Command block: the meaning of most registers depends on the command */
++#define W4_COMMAND			0x0100
++#define W4_CORE_INDEX			0x0104
++#define W4_INST_INDEX			0x0108
++#define W4_COMMAND_OPTION		0x010c
++#define W4_RET_SUCCESS			0x0110
++#define W4_RET_FAIL_REASON		0x0114
++
++/* INIT_VPU */
++#define W4_ADDR_CODE_BASE		0x0118
++#define W4_CODE_SIZE			0x011c
++#define W4_CODE_PARAM			0x0120
++#define W4_HW_OPTION			0x0124
++#define W4_TIMEOUT_CNT			0x0134
++
++/* GET_FW_VERSION */
++#define W4_RET_FW_VERSION		0x0118
++#define W4_RET_PRODUCT_NAME		0x011c
++#define W4_RET_PRODUCT_VERSION		0x0120
++#define W4_RET_CONFIG_REVISION		0x0134
++
++/* Bitstream, work and temp buffers: SET_PARAM and ENC_PIC */
++#define W4_BS_START_ADDR		0x0120
++#define W4_BS_SIZE			0x0124
++#define W4_BS_PARAM			0x0128
++#define W4_BS_OPTION			0x012c
++#define W4_BS_RD_PTR			0x0130
++#define W4_BS_WR_PTR			0x0134
++#define W4_ADDR_WORK_BASE		0x0138
++#define W4_WORK_SIZE			0x013c
++#define W4_WORK_PARAM			0x0140
++#define W4_ADDR_TEMP_BASE		0x0144
++#define W4_TEMP_SIZE			0x0148
++#define W4_TEMP_PARAM			0x014c
++#define W4_ADDR_SEC_AXI			0x0150
++#define W4_SEC_AXI_SIZE			0x0154
++#define W4_USE_SEC_AXI			0x0158
++
++/* SET_PARAM, option COMMON */
++#define W4_SET_PARAM_ENABLE		0x015c
++#define W4_SEQ_SRC_SIZE			0x0160
++#define W4_SEQ_PIC_PARAM		0x016c
++#define W4_SEQ_GOP_PARAM		0x0170
++#define W4_SEQ_INTRA_PARAM		0x0174
++#define W4_SEQ_CONF_WIN_TOP_BOT		0x0178
++#define W4_SEQ_CONF_WIN_LEFT_RIGHT	0x017c
++#define W4_SEQ_FRAME_RATE		0x0180
++#define W4_SEQ_INDEPENDENT_SLICE	0x0184
++#define W4_SEQ_DEPENDENT_SLICE		0x0188
++#define W4_SEQ_INTRA_REFRESH		0x018c
++#define W4_ENC_PARAM			0x0190
++#define W4_SEQ_LAYER_PERIOD		0x0194
++#define W4_RC_PARAM			0x0198
++#define W4_RC_MIN_MAX_QP		0x019c
++#define W4_RC_BIT_RATIO_LAYER_0_3	0x01a0
++#define W4_RC_BIT_RATIO_LAYER_4_7	0x01a4
++#define W4_NR_PARAM			0x01a8
++#define W4_NR_WEIGHT			0x01ac
++#define W4_NUM_UNITS_IN_TICK		0x01b0
++#define W4_TIME_SCALE			0x01b4
++#define W4_NUM_TICKS_POC_DIFF_ONE	0x01b8
++#define W4_RC_TRANS_RATE		0x01bc
++#define W4_RC_TARGET_RATE		0x01c0
++#define W4_ROT_PARAM			0x01c4
++#define W4_RET_ENC_MIN_FB_NUM		0x01cc
++#define W4_RET_ENC_MIN_SRC_BUF_NUM	0x01d8
++
++/* SET_FRAMEBUF */
++#define W4_COMMON_PIC_INFO		0x0120
++#define W4_PIC_SIZE			0x0124
++#define W4_SET_FB_NUM			0x0128
++#define W4_FBC_STRIDE			0x0154
++#define W4_ADDR_SUB_SAMPLED_FB_BASE	0x0158
++#define W4_SUB_SAMPLED_ONE_FB_SIZE	0x015c
++#define W4_ADDR_LUMA_BASE(i)		(0x0160 + (i) * 16)
++#define W4_ADDR_CB_BASE(i)		(0x0164 + (i) * 16)
++#define W4_ADDR_FBC_Y_OFFSET(i)		(0x0168 + (i) * 16)
++#define W4_ADDR_FBC_C_OFFSET(i)		(0x016c + (i) * 16)
++#define W4_ADDR_MV_COL(i)		(0x01e0 + (i) * 4)
++
++/* ENC_PIC */
++#define W4_ENC_ADDR_REPORT_BASE		0x015c
++#define W4_ENC_REPORT_SIZE		0x0160
++#define W4_ENC_REPORT_PARAM		0x0164
++#define W4_ENC_CODE_OPTION		0x0168
++#define W4_ENC_PIC_PARAM		0x016c
++#define W4_ENC_SRC_PIC_IDX		0x0170
++#define W4_ENC_SRC_ADDR_Y		0x0174
++#define W4_ENC_SRC_ADDR_U		0x0178
++#define W4_ENC_SRC_ADDR_V		0x017c
++#define W4_ENC_SRC_STRIDE		0x0180
++#define W4_ENC_SRC_FORMAT		0x0184
++#define W4_ENC_PREFIX_SEI_NAL_ADDR	0x0188
++#define W4_ENC_PREFIX_SEI_INFO		0x018c
++#define W4_ENC_SUFFIX_SEI_NAL_ADDR	0x0190
++#define W4_ENC_SUFFIX_SEI_INFO		0x0194
++#define W4_ENC_LONGTERM_PIC		0x0198
++#define W4_ENC_SUB_FRAME_SYNC_CONFIG	0x019c
++#define W4_ENC_CTU_OPT_PARAM		0x01a0
++#define W4_ENC_ROI_ADDR_CTU_MAP		0x01a4
++#define W4_ENC_CTU_MODE_MAP_ADDR	0x01a8
++#define W4_ENC_CTU_QP_MAP_ADDR		0x01ac
++#define W4_ENC_SRC_TIMESTAMP_LOW	0x01b0
++#define W4_ENC_SRC_TIMESTAMP_HIGH	0x01b4
++#define W4_ENC_HOST_PIC_QP		0x01b8
++#define W4_ENC_HOST_PIC_TARGET_BIT	0x01bc
++#define W4_RET_ENC_PIC_IDX		0x01a8
++#define W4_RET_ENC_PIC_BYTE		0x01c8
++#define W4_RET_ENC_PIC_NUM		0x01dc
++#define W4_RET_ENC_PIC_TYPE		0x01e0
++#define W4_RET_ENC_VCL_NUT		0x01e4
++
++/* Commands */
++#define W4_CMD_INIT_VPU			0x0001
++#define W4_CMD_SET_PARAM		0x0002
++#define W4_CMD_FINI_SEQ			0x0004
++#define W4_CMD_ENC_PIC			0x0008
++#define W4_CMD_SET_FRAMEBUF		0x0010
++#define W4_CMD_GET_FW_VERSION		0x0100
++#define W4_CMD_CREATE_INSTANCE		0x4000
++
++/* Interrupt reasons */
++#define W4_INT_SET_PARAM		1
++#define W4_INT_ENC_PIC			3
++#define W4_INT_BSBUF_FULL		15
++
++#define W4_CODEC_HEVC_ENC		1
++#define W4_PRODUCT_WAVE420L		0x4201
++
++/* 128-bit little endian: the stream and source endian fields take ~0 */
++#define W4_ENDIAN_128BIT_LE		0xf
++
++/* CODE_OPTION: headers when the firmware sees the need, then the picture */
++#define W4_CODEOPT_HEADER_IMPLICIT	BIT(0)
++#define W4_CODEOPT_VCL			BIT(1)
++
++/* GOP preset 2: I, then consecutive P pictures */
++#define W4_GOP_PRESET_IPP		2
++#define W4_REFRESH_IDR			2
++#define W4_PIC_TYPE_IDR			3
++
++#define W4_CODE_BUF_SIZE		SZ_256K
++#define W4_TEMP_BUF_SIZE		SZ_512K
++#define W4_WORK_BUF_SIZE		SZ_128K
++#define W4_HDR_BUF_SIZE			SZ_64K
++#define W4_MAX_INSTANCES		4
++#define W4_MAX_FBS			16
++#define W4_TIMEOUT_MS			1000
++
++#define W4_MIN_W			256
++#define W4_MIN_H			128
++#define W4_MAX_W			4096
++#define W4_MAX_H			2304
++
++/* The codec control block that the SG2000 codecs share */
++#define SG2000_VC_SRAM_SHARE		0x24
++#define SG2000_VC_SRAM_TO_H265		2
++
++enum { W4_SRC, W4_DST };
++
++struct w4_buf {
++	void *vaddr;
++	dma_addr_t dma;
++	size_t size;
++};
++
++struct w4_q_data {
++	u32 fourcc;
++	u32 width;
++	u32 height;
++	u32 bytesperline;
++	u32 sizeimage;
++};
++
++struct w4_dev {
++	struct device *dev;
++	struct v4l2_device v4l2_dev;
++	struct video_device vfd;
++	struct v4l2_m2m_dev *m2m_dev;
++	struct workqueue_struct *wq;
++
++	void __iomem *regs;
++	void __iomem *ctrl;
++	int irq;
++
++	/* Serializes the ioctls */
++	struct mutex lock;
++	/* Serializes the firmware commands */
++	struct mutex hw_lock;
++	struct completion done;
++	u32 int_reason;
++
++	/* Firmware code, then the temp buffer that all instances share */
++	struct w4_buf common;
++	bool booted;
++	struct ida inst_ida;
++};
++
++struct w4_ctx {
++	struct v4l2_fh fh;
++	struct w4_dev *dev;
++	struct v4l2_ctrl_handler hdl;
++	struct w4_q_data q[2];
++	struct work_struct run_work;
++
++	u32 gop_size;
++	u32 qp_i;
++	u32 qp_p;
++	bool force_key;
++	u32 fps;
++
++	int inst;
++	bool seq_ready;
++	/* The VPU hung on a picture of this sequence */
++	bool broken;
++	u32 frame_num;
++
++	struct w4_buf work;
++	struct w4_buf hdr;
++	unsigned int num_fbs;
++	struct w4_buf fb[W4_MAX_FBS];
++	struct w4_buf mvcol, fbc_y, fbc_c, subsamp;
++	u32 mvcol_size, fbc_y_size, fbc_c_size, subsamp_size;
++};
++
++static int w4_debug;
++module_param_named(debug, w4_debug, int, 0644);
++MODULE_PARM_DESC(debug, "1: log each sequence and picture");
++
++#define w4_dbg(w4, fmt, ...)						\
++	do {								\
++		if (w4_debug)						\
++			dev_info((w4)->dev, fmt, ##__VA_ARGS__);	\
++	} while (0)
++
++static const char * const w4_fw_names[] = {
++	"v4l-wave420l-sg2000.bin",
++	"sophgo/monet.bin",
++	"monet.bin",
++};
++
++static inline struct w4_ctx *fh_to_ctx(struct v4l2_fh *fh)
++{
++	return container_of(fh, struct w4_ctx, fh);
++}
++
++static inline void w4_write(struct w4_dev *dev, u32 val, u32 reg)
++{
++	writel(val, dev->regs + reg);
++}
++
++static inline u32 w4_read(struct w4_dev *dev, u32 reg)
++{
++	return readl(dev->regs + reg);
++}
++
++static int w4_alloc(struct w4_dev *dev, struct w4_buf *b, size_t size)
++{
++	b->size = PAGE_ALIGN(size);
++	b->vaddr = dma_alloc_coherent(dev->dev, b->size, &b->dma, GFP_KERNEL);
++	if (!b->vaddr) {
++		b->size = 0;
++		return -ENOMEM;
++	}
++	memset(b->vaddr, 0, b->size);
++	return 0;
++}
++
++static void w4_free(struct w4_dev *dev, struct w4_buf *b)
++{
++	if (b->vaddr)
++		dma_free_coherent(dev->dev, b->size, b->vaddr, b->dma);
++	memset(b, 0, sizeof(*b));
++}
++
++/* The H.264 and H.265 cores share one SRAM: give it to the H.265 core */
++static void w4_claim_sram(struct w4_dev *dev)
++{
++	if (dev->ctrl)
++		writel(SG2000_VC_SRAM_TO_H265, dev->ctrl + SG2000_VC_SRAM_SHARE);
++}
++
++/* inst < 0: a command for the VPU, not for an instance */
++static void w4_issue(struct w4_dev *dev, int inst, u32 cmd)
++{
++	w4_write(dev, 1, W4_VPU_BUSY_STATUS);
++	w4_write(dev, 0, W4_RET_SUCCESS);
++	w4_write(dev, 0, W4_CORE_INDEX);
++	w4_write(dev, inst < 0 ? 0 : (inst & 0xffff) | W4_CODEC_HEVC_ENC << 16,
++		 W4_INST_INDEX);
++	w4_write(dev, cmd, W4_COMMAND);
++	if (cmd != W4_CMD_INIT_VPU)
++		w4_write(dev, 1, W4_VPU_HOST_INT_REQ);
++}
++
++static int w4_wait_busy(struct w4_dev *dev)
++{
++	u32 val;
++
++	return readl_poll_timeout(dev->regs + W4_VPU_BUSY_STATUS, val, !val,
++				  10, W4_TIMEOUT_MS * USEC_PER_MSEC);
++}
++
++/* Run a command and poll for its end. Return 0 on success. */
++static int w4_cmd_poll(struct w4_dev *dev, int inst, u32 cmd)
++{
++	w4_issue(dev, inst, cmd);
++	if (w4_wait_busy(dev)) {
++		dev_err(dev->dev, "command 0x%x: timeout\n", cmd);
++		return -ETIMEDOUT;
++	}
++	if (!w4_read(dev, W4_RET_SUCCESS)) {
++		dev_err(dev->dev, "command 0x%x failed: reason 0x%x\n", cmd,
++			w4_read(dev, W4_RET_FAIL_REASON));
++		return -EIO;
++	}
++	return 0;
++}
++
++/* Run a command that ends with an interrupt. Return the reason, or < 0. */
++static int w4_cmd_irq(struct w4_dev *dev, int inst, u32 cmd)
++{
++	reinit_completion(&dev->done);
++	dev->int_reason = 0;
++	w4_issue(dev, inst, cmd);
++	if (!wait_for_completion_timeout(&dev->done,
++					 msecs_to_jiffies(W4_TIMEOUT_MS))) {
++		if (w4_read(dev, W4_VPU_BUSY_STATUS)) {
++			dev_err(dev->dev, "command 0x%x: timeout\n", cmd);
++			return -ETIMEDOUT;
++		}
++		dev_warn_once(dev->dev, "command 0x%x: done without IRQ\n",
++			      cmd);
++	}
++	return dev->int_reason;
++}
++
++static irqreturn_t w4_irq(int irq, void *data)
++{
++	struct w4_dev *dev = data;
++	u32 reason;
++
++	if (!w4_read(dev, W4_VPU_VPU_INT_STS))
++		return IRQ_NONE;
++
++	reason = w4_read(dev, W4_VPU_VINT_REASON);
++	w4_write(dev, reason, W4_VPU_VINT_REASON_CLR);
++	w4_write(dev, 1, W4_VPU_VINT_CLEAR);
++
++	dev->int_reason |= reason;
++	complete(&dev->done);
++
++	return IRQ_HANDLED;
++}
++
++static int w4_boot(struct w4_dev *dev)
++{
++	const struct firmware *fw = NULL;
++	u32 val, product;
++	int i, ret;
++
++	if (dev->booted)
++		return 0;
++
++	product = w4_read(dev, W4_PRODUCT_NUMBER);
++	if (product != W4_PRODUCT_WAVE420L)
++		dev_warn(dev->dev, "product number 0x%x, expected 0x%x\n",
++			 product, W4_PRODUCT_WAVE420L);
++
++	for (i = 0; i < ARRAY_SIZE(w4_fw_names); i++) {
++		ret = firmware_request_nowarn(&fw, w4_fw_names[i], dev->dev);
++		if (!ret)
++			break;
++	}
++	if (ret) {
++		dev_err(dev->dev, "firmware not found: put monet.bin in /lib/firmware\n");
++		return ret;
++	}
++	if (fw->size > W4_CODE_BUF_SIZE) {
++		dev_err(dev->dev, "firmware too large: %zu bytes\n", fw->size);
++		release_firmware(fw);
++		return -EINVAL;
++	}
++
++	if (!dev->common.vaddr) {
++		ret = w4_alloc(dev, &dev->common,
++			       W4_CODE_BUF_SIZE + W4_TEMP_BUF_SIZE);
++		if (ret) {
++			release_firmware(fw);
++			return ret;
++		}
++	}
++	memcpy(dev->common.vaddr, fw->data, fw->size);
++	dev_info(dev->dev, "loaded %s, %zu bytes\n", w4_fw_names[i], fw->size);
++	release_firmware(fw);
++
++	w4_claim_sram(dev);
++
++	w4_write(dev, 0, W4_PO_CONF);
++	w4_write(dev, 0x7ffffff, W4_VPU_RESET_REQ);
++	ret = readl_poll_timeout(dev->regs + W4_VPU_RESET_STATUS, val, !val,
++				 10, W4_TIMEOUT_MS * USEC_PER_MSEC);
++	w4_write(dev, 0, W4_VPU_RESET_REQ);
++	if (ret) {
++		dev_err(dev->dev, "reset timeout\n");
++		return ret;
++	}
++
++	for (i = W4_COMMAND; i < 0x200; i += 4)
++		w4_write(dev, 0, i);
++
++	/* Map the code at VPU address 0 */
++	w4_write(dev, BIT(31) | BIT(11) | ((W4_CODE_BUF_SIZE >> 12) & 0x1ff),
++		 W4_VPU_REMAP_CTRL);
++	w4_write(dev, 0, W4_VPU_REMAP_VADDR);
++	w4_write(dev, dev->common.dma, W4_VPU_REMAP_PADDR);
++	w4_write(dev, dev->common.dma, W4_ADDR_CODE_BASE);
++	w4_write(dev, W4_CODE_BUF_SIZE, W4_CODE_SIZE);
++	w4_write(dev, 0, W4_CODE_PARAM);
++	w4_write(dev, 0xffffffff, W4_TIMEOUT_CNT);
++	w4_write(dev, 0, W4_HW_OPTION);
++	w4_write(dev, BIT(W4_INT_ENC_PIC) | BIT(W4_INT_SET_PARAM) |
++		 BIT(W4_INT_BSBUF_FULL), W4_VPU_VINT_ENABLE);
++
++	w4_issue(dev, -1, W4_CMD_INIT_VPU);
++	w4_write(dev, 1, W4_VPU_REMAP_CORE_START);
++	if (w4_wait_busy(dev)) {
++		dev_err(dev->dev, "INIT_VPU timeout\n");
++		return -ETIMEDOUT;
++	}
++	if (!w4_read(dev, W4_RET_SUCCESS)) {
++		dev_err(dev->dev, "INIT_VPU failed: reason 0x%x\n",
++			w4_read(dev, W4_RET_FAIL_REASON));
++		return -EIO;
++	}
++
++	ret = w4_cmd_poll(dev, -1, W4_CMD_GET_FW_VERSION);
++	if (ret)
++		return ret;
++	val = w4_read(dev, W4_RET_PRODUCT_NAME);
++	dev_info(dev->dev,
++		 "%c%c%c%c product 0x%x, firmware %u, hardware revision %u\n",
++		 val >> 24, (val >> 16) & 0xff, (val >> 8) & 0xff, val & 0xff,
++		 w4_read(dev, W4_RET_PRODUCT_VERSION),
++		 w4_read(dev, W4_RET_FW_VERSION),
++		 w4_read(dev, W4_RET_CONFIG_REVISION));
++
++	dev->booted = true;
++	return 0;
++}
++
++static void w4_set_buffers(struct w4_ctx *ctx)
++{
++	struct w4_dev *dev = ctx->dev;
++
++	w4_write(dev, 0, W4_ADDR_SEC_AXI);
++	w4_write(dev, 0, W4_SEC_AXI_SIZE);
++	w4_write(dev, 0, W4_USE_SEC_AXI);
++	w4_write(dev, ctx->work.dma, W4_ADDR_WORK_BASE);
++	w4_write(dev, ctx->work.size, W4_WORK_SIZE);
++	w4_write(dev, 0, W4_WORK_PARAM);
++	w4_write(dev, dev->common.dma + W4_CODE_BUF_SIZE, W4_ADDR_TEMP_BASE);
++	w4_write(dev, W4_TEMP_BUF_SIZE, W4_TEMP_SIZE);
++	w4_write(dev, 0, W4_TEMP_PARAM);
++}
++
++static void w4_set_bitstream(struct w4_dev *dev, dma_addr_t addr, u32 size)
++{
++	w4_write(dev, addr, W4_BS_START_ADDR);
++	w4_write(dev, size, W4_BS_SIZE);
++	w4_write(dev, addr, W4_BS_RD_PTR);
++	w4_write(dev, addr, W4_BS_WR_PTR);
++	w4_write(dev, W4_ENDIAN_128BIT_LE, W4_BS_PARAM);
++}
++
++static int w4_set_param(struct w4_ctx *ctx)
++{
++	struct w4_dev *dev = ctx->dev;
++	struct w4_q_data *src = &ctx->q[W4_SRC];
++	u32 w8 = ALIGN(src->width, 8), h8 = ALIGN(src->height, 8);
++	int reason;
++
++	w4_set_bitstream(dev, ctx->hdr.dma, ctx->hdr.size);
++	w4_set_buffers(ctx);
++
++	w4_write(dev, 0, W4_COMMAND_OPTION);		/* OPT_COMMON */
++	w4_write(dev, 0xffffffff, W4_SET_PARAM_ENABLE);
++	w4_write(dev, h8 << 16 | w8, W4_SEQ_SRC_SIZE);
++	/* Main profile, level from the firmware, 8 bit, 4:2:0 */
++	w4_write(dev, 1 | 8 << 14, W4_SEQ_PIC_PARAM);
++	w4_write(dev, W4_GOP_PRESET_IPP | 30 << 9 | 33 << 15 | 36 << 21,
++		 W4_SEQ_GOP_PARAM);
++	w4_write(dev, 1 << 16, W4_SEQ_LAYER_PERIOD);
++	/* No rate control */
++	w4_write(dev, BIT(2) | BIT(3) | 2 << 4 | 1 << 7 | 1 << 9 | 63 << 14,
++		 W4_RC_PARAM);
++	/*
++	 * IDR refresh, headers with every IDR picture. The driver forces the
++	 * IDR pictures, like the vendor driver: intra period 0.
++	 */
++	w4_write(dev, W4_REFRESH_IDR | ctx->qp_i << 3 | BIT(9),
++		 W4_SEQ_INTRA_PARAM);
++	w4_write(dev, (h8 - src->height) << 16, W4_SEQ_CONF_WIN_TOP_BOT);
++	w4_write(dev, (w8 - src->width) << 16, W4_SEQ_CONF_WIN_LEFT_RIGHT);
++	w4_write(dev, ctx->fps, W4_SEQ_FRAME_RATE);
++	w4_write(dev, 0, W4_SEQ_INDEPENDENT_SLICE);
++	w4_write(dev, 0, W4_SEQ_DEPENDENT_SLICE);
++	w4_write(dev, 0, W4_SEQ_INTRA_REFRESH);
++	/*
++	 * Custom parameters: CU sizes 8, 16 and 32, TMVP, 2 merge
++	 * candidates, dynamic merge, deblocking across slices, intra
++	 * transform skip, intra in inter slices. No SAO.
++	 */
++	w4_write(dev, 0x7 << 4 | BIT(7) | 2 << 9 | BIT(12) | BIT(13) |
++		 BIT(14) | BIT(16) | BIT(25) | BIT(27), W4_ENC_PARAM);
++	w4_write(dev, 8 | 51 << 6 | 10 << 12, W4_RC_MIN_MAX_QP);
++	w4_write(dev, 0x01010101, W4_RC_BIT_RATIO_LAYER_0_3);
++	w4_write(dev, 0x01010101, W4_RC_BIT_RATIO_LAYER_4_7);
++	w4_write(dev, BIT(3), W4_NR_PARAM);		/* noise estimation */
++	w4_write(dev, 7 | 7 << 5 | 7 << 10 | 4 << 15 | 4 << 20 | 4 << 25,
++		 W4_NR_WEIGHT);
++	w4_write(dev, 0, W4_RC_TARGET_RATE);
++	w4_write(dev, 51000000, W4_RC_TRANS_RATE);
++	w4_write(dev, 0, W4_ROT_PARAM);
++	w4_write(dev, 0, W4_NUM_UNITS_IN_TICK);
++	w4_write(dev, 0, W4_TIME_SCALE);
++	w4_write(dev, 0, W4_NUM_TICKS_POC_DIFF_ONE);
++
++	reason = w4_cmd_irq(dev, ctx->inst, W4_CMD_SET_PARAM);
++	if (reason < 0)
++		return reason;
++	if (!w4_read(dev, W4_RET_SUCCESS)) {
++		dev_err(dev->dev, "SET_PARAM failed: reason 0x%x\n",
++			w4_read(dev, W4_RET_FAIL_REASON));
++		return -EIO;
++	}
++
++	ctx->num_fbs = w4_read(dev, W4_RET_ENC_MIN_FB_NUM);
++	w4_dbg(dev, "SET_PARAM: %u frame buffers, %u source buffers\n",
++	       ctx->num_fbs, w4_read(dev, W4_RET_ENC_MIN_SRC_BUF_NUM));
++	if (!ctx->num_fbs)
++		ctx->num_fbs = 2;
++	if (ctx->num_fbs > W4_MAX_FBS) {
++		dev_err(dev->dev, "%u frame buffers needed\n", ctx->num_fbs);
++		return -EINVAL;
++	}
++	return 0;
++}
++
++/* Reconstructed frames: compressed (FBC), with their side buffers */
++static int w4_set_framebuf(struct w4_ctx *ctx)
++{
++	struct w4_dev *dev = ctx->dev;
++	struct w4_q_data *src = &ctx->q[W4_SRC];
++	u32 w = ALIGN(src->width, 8), h = ALIGN(src->height, 8);
++	u32 stride = ALIGN(w, 32);
++	u32 luma = ALIGN(stride * h, SZ_4K);
++	u32 chroma = ALIGN((ALIGN(stride / 2, 16) * h) / 2, SZ_4K);
++	unsigned int i, j, n = ctx->num_fbs;
++	int ret;
++
++	ctx->mvcol_size = ALIGN(((w + 63) / 64) * ((h + 63) / 64) * 128, 16);
++	ctx->fbc_y_size = ALIGN(((h + 15) / 16) * ((w + 255) / 256) * 128, 16);
++	ctx->fbc_c_size = ALIGN(((h + 15) / 16) * ((w / 2 + 255) / 256) * 128,
++				16);
++	ctx->subsamp_size = ALIGN(w / 4, 16) * ALIGN(h / 4, 8);
++
++	for (i = 0; i < n; i++) {
++		ret = w4_alloc(dev, &ctx->fb[i], luma + 2 * chroma);
++		if (ret)
++			return ret;
++	}
++	ret = w4_alloc(dev, &ctx->mvcol, ctx->mvcol_size * n + SZ_4K);
++	if (!ret)
++		ret = w4_alloc(dev, &ctx->fbc_y, ctx->fbc_y_size * n + SZ_4K);
++	if (!ret)
++		ret = w4_alloc(dev, &ctx->fbc_c, ctx->fbc_c_size * n + SZ_4K);
++	if (!ret)
++		ret = w4_alloc(dev, &ctx->subsamp,
++			       ctx->subsamp_size * n + SZ_4K);
++	if (ret)
++		return ret;
++
++	w4_write(dev, ctx->subsamp.dma, W4_ADDR_SUB_SAMPLED_FB_BASE);
++	w4_write(dev, ctx->subsamp_size, W4_SUB_SAMPLED_ONE_FB_SIZE);
++	w4_write(dev, w << 16 | h, W4_PIC_SIZE);
++	w4_write(dev, ALIGN(ALIGN(src->width, 16) * 4, 32) << 16 |
++		 ALIGN(ALIGN(src->width / 2, 16) * 4, 32), W4_FBC_STRIDE);
++	w4_write(dev, stride, W4_COMMON_PIC_INFO);
++
++	/* At most 8 frame buffers per command */
++	for (i = 0; i < n; i += 8) {
++		unsigned int cnt = min(n - i, 8U);
++
++		w4_write(dev, (i + cnt == n) << 4 | (i == 0) << 3,
++			 W4_COMMAND_OPTION);
++		w4_write(dev, i << 8 | (i + cnt - 1), W4_SET_FB_NUM);
++		for (j = 0; j < cnt; j++) {
++			unsigned int k = i + j;
++
++			w4_write(dev, ctx->fb[k].dma, W4_ADDR_LUMA_BASE(j));
++			w4_write(dev, ctx->fb[k].dma + luma, W4_ADDR_CB_BASE(j));
++			w4_write(dev, ctx->fbc_y.dma + k * ctx->fbc_y_size,
++				 W4_ADDR_FBC_Y_OFFSET(j));
++			w4_write(dev, ctx->fbc_c.dma + k * ctx->fbc_c_size,
++				 W4_ADDR_FBC_C_OFFSET(j));
++			w4_write(dev, ctx->mvcol.dma + k * ctx->mvcol_size,
++				 W4_ADDR_MV_COL(j));
++		}
++		w4_write(dev, ctx->work.dma, W4_ADDR_WORK_BASE);
++		w4_write(dev, ctx->work.size, W4_WORK_SIZE);
++		w4_write(dev, 0, W4_WORK_PARAM);
++		ret = w4_cmd_poll(dev, ctx->inst, W4_CMD_SET_FRAMEBUF);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++static void w4_free_seq(struct w4_ctx *ctx)
++{
++	struct w4_dev *dev = ctx->dev;
++	unsigned int i;
++
++	for (i = 0; i < W4_MAX_FBS; i++)
++		w4_free(dev, &ctx->fb[i]);
++	w4_free(dev, &ctx->mvcol);
++	w4_free(dev, &ctx->fbc_y);
++	w4_free(dev, &ctx->fbc_c);
++	w4_free(dev, &ctx->subsamp);
++	w4_free(dev, &ctx->hdr);
++	w4_free(dev, &ctx->work);
++	if (ctx->inst >= 0)
++		ida_free(&dev->inst_ida, ctx->inst);
++	ctx->inst = -1;
++	ctx->seq_ready = false;
++}
++
++static int w4_start_seq(struct w4_ctx *ctx)
++{
++	struct w4_dev *dev = ctx->dev;
++	int ret;
++
++	ret = ida_alloc_max(&dev->inst_ida, W4_MAX_INSTANCES - 1, GFP_KERNEL);
++	if (ret < 0)
++		return ret;
++	ctx->inst = ret;
++
++	ret = w4_alloc(dev, &ctx->work, W4_WORK_BUF_SIZE);
++	if (!ret)
++		ret = w4_alloc(dev, &ctx->hdr, W4_HDR_BUF_SIZE);
++	if (ret)
++		goto err;
++
++	mutex_lock(&dev->hw_lock);
++	ret = w4_boot(dev);
++	if (ret)
++		goto err_unlock;
++	w4_claim_sram(dev);
++
++	w4_write(dev, ctx->work.dma, W4_ADDR_WORK_BASE);
++	w4_write(dev, ctx->work.size, W4_WORK_SIZE);
++	w4_write(dev, 0, W4_WORK_PARAM);
++	ret = w4_cmd_poll(dev, ctx->inst, W4_CMD_CREATE_INSTANCE);
++	if (ret)
++		goto err_unlock;
++
++	ret = w4_set_param(ctx);
++	if (!ret)
++		ret = w4_set_framebuf(ctx);
++	if (ret) {
++		w4_set_buffers(ctx);
++		w4_cmd_poll(dev, ctx->inst, W4_CMD_FINI_SEQ);
++		goto err_unlock;
++	}
++	mutex_unlock(&dev->hw_lock);
++
++	ctx->frame_num = 0;
++	ctx->seq_ready = true;
++	w4_dbg(dev, "instance %d: %ux%u, %u frame buffers\n", ctx->inst,
++	       ctx->q[W4_SRC].width, ctx->q[W4_SRC].height, ctx->num_fbs);
++	return 0;
++
++err_unlock:
++	mutex_unlock(&dev->hw_lock);
++err:
++	w4_free_seq(ctx);
++	return ret;
++}
++
++static void w4_stop_seq(struct w4_ctx *ctx)
++{
++	struct w4_dev *dev = ctx->dev;
++
++	if (!ctx->seq_ready)
++		return;
++
++	flush_work(&ctx->run_work);
++	mutex_lock(&dev->hw_lock);
++	if (!ctx->broken && dev->booted) {
++		w4_claim_sram(dev);
++		w4_set_buffers(ctx);
++		w4_cmd_poll(dev, ctx->inst, W4_CMD_FINI_SEQ);
++	}
++	mutex_unlock(&dev->hw_lock);
++	ctx->broken = false;
++	w4_free_seq(ctx);
++}
++
++/* Encode one picture */
++static void w4_run_work(struct work_struct *work)
++{
++	struct w4_ctx *ctx = container_of(work, struct w4_ctx, run_work);
++	struct w4_dev *dev = ctx->dev;
++	struct w4_q_data *src_q = &ctx->q[W4_SRC];
++	struct vb2_v4l2_buffer *src, *dst;
++	enum vb2_buffer_state state = VB2_BUF_STATE_ERROR;
++	dma_addr_t y, c, out;
++	u32 pic_param, size = 0, rd, wr, bytes, nut;
++	bool idr;
++	int reason;
++
++	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
++	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
++	if (!src || !dst)
++		goto out;
++	idr = false;
++	if (!ctx->seq_ready || ctx->broken)
++		goto done;
++
++	y = vb2_dma_contig_plane_dma_addr(&src->vb2_buf, 0);
++	c = y + src_q->bytesperline * src_q->height;
++	out = vb2_dma_contig_plane_dma_addr(&dst->vb2_buf, 0);
++
++	idr = ctx->frame_num == 0 || ctx->force_key ||
++	      (ctx->gop_size && ctx->frame_num % ctx->gop_size == 0);
++	if (idr)
++		ctx->frame_num = 0;
++	ctx->force_key = false;
++
++	/* Constant QP; IDR pictures forced by the driver */
++	pic_param = BIT(1) | ctx->qp_i << 2 | ctx->qp_p << 8 | ctx->qp_p << 14;
++	if (idr)
++		pic_param |= BIT(20) | W4_PIC_TYPE_IDR << 21;
++
++	mutex_lock(&dev->hw_lock);
++	w4_claim_sram(dev);
++	w4_set_bitstream(dev, out, vb2_plane_size(&dst->vb2_buf, 0));
++	w4_set_buffers(ctx);
++	w4_write(dev, 0, W4_ENC_ADDR_REPORT_BASE);
++	w4_write(dev, 0, W4_ENC_REPORT_SIZE);
++	w4_write(dev, 0, W4_ENC_REPORT_PARAM);
++	w4_write(dev, W4_CODEOPT_HEADER_IMPLICIT | W4_CODEOPT_VCL,
++		 W4_ENC_CODE_OPTION);
++	w4_write(dev, pic_param, W4_ENC_PIC_PARAM);
++	w4_write(dev, src->vb2_buf.index, W4_ENC_SRC_PIC_IDX);
++	w4_write(dev, y, W4_ENC_SRC_ADDR_Y);
++	w4_write(dev, c, W4_ENC_SRC_ADDR_U);
++	w4_write(dev, c, W4_ENC_SRC_ADDR_V);
++	w4_write(dev, src_q->bytesperline << 16 | src_q->bytesperline,
++		 W4_ENC_SRC_STRIDE);
++	/* NV12: CbCr interleaved; 8 bit, left justified; endian */
++	w4_write(dev, BIT(1) | (BIT(2) << 3) | W4_ENDIAN_128BIT_LE << 6,
++		 W4_ENC_SRC_FORMAT);
++	w4_write(dev, 0, W4_ENC_PREFIX_SEI_NAL_ADDR);
++	w4_write(dev, 0, W4_ENC_PREFIX_SEI_INFO);
++	w4_write(dev, 0, W4_ENC_SUFFIX_SEI_NAL_ADDR);
++	w4_write(dev, 0, W4_ENC_SUFFIX_SEI_INFO);
++	w4_write(dev, 0, W4_ENC_ROI_ADDR_CTU_MAP);
++	w4_write(dev, 0, W4_ENC_CTU_MODE_MAP_ADDR);
++	w4_write(dev, 0, W4_ENC_CTU_QP_MAP_ADDR);
++	w4_write(dev, 0, W4_ENC_CTU_OPT_PARAM);
++	w4_write(dev, 0, W4_ENC_SRC_TIMESTAMP_LOW);
++	w4_write(dev, 0, W4_ENC_SRC_TIMESTAMP_HIGH);
++	w4_write(dev, 0, W4_ENC_LONGTERM_PIC);
++	w4_write(dev, 0, W4_ENC_SUB_FRAME_SYNC_CONFIG);
++	w4_write(dev, 0, W4_ENC_HOST_PIC_QP);
++	w4_write(dev, 0, W4_ENC_HOST_PIC_TARGET_BIT);
++
++	/*
++	 * After a timeout or a full output buffer the VPU still works on the
++	 * picture. Stop this stream; the next stream boots the VPU again.
++	 */
++	reason = w4_cmd_irq(dev, ctx->inst, W4_CMD_ENC_PIC);
++	if (reason < 0 || reason & BIT(W4_INT_BSBUF_FULL)) {
++		dev_err(dev->dev, "ENC_PIC: %s; stop the stream\n",
++			reason < 0 ? "no answer" : "output buffer full");
++		dev->booted = false;
++		ctx->broken = true;
++		goto unlock;
++	}
++	if (!w4_read(dev, W4_RET_SUCCESS)) {
++		dev_err(dev->dev, "ENC_PIC failed: reason 0x%x\n",
++			w4_read(dev, W4_RET_FAIL_REASON));
++		goto unlock;
++	}
++
++	rd = w4_read(dev, W4_BS_RD_PTR);
++	wr = w4_read(dev, W4_BS_WR_PTR);
++	bytes = w4_read(dev, W4_RET_ENC_PIC_BYTE);
++	nut = w4_read(dev, W4_RET_ENC_VCL_NUT);
++	/* The stream starts at the buffer: wr - rd includes the headers */
++	size = wr - rd;
++	if (rd != lower_32_bits(out) || !size ||
++	    size > vb2_plane_size(&dst->vb2_buf, 0))
++		size = bytes;
++	w4_dbg(dev,
++	       "frame %u: %u bytes (pic %u, rd 0x%x, wr 0x%x), type %u, nut %u, recon %d\n",
++	       ctx->frame_num, size, bytes, rd, wr,
++	       w4_read(dev, W4_RET_ENC_PIC_TYPE), nut,
++	       (int)w4_read(dev, W4_RET_ENC_PIC_IDX));
++	state = VB2_BUF_STATE_DONE;
++
++unlock:
++	mutex_unlock(&dev->hw_lock);
++done:
++	src = v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
++	dst = v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
++	v4l2_m2m_buf_copy_metadata(src, dst);
++	dst->flags &= ~(V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME);
++	dst->flags |= idr ? V4L2_BUF_FLAG_KEYFRAME : V4L2_BUF_FLAG_PFRAME;
++	vb2_set_plane_payload(&dst->vb2_buf, 0, size);
++	v4l2_m2m_buf_done(src, state);
++	v4l2_m2m_buf_done(dst, state);
++	ctx->frame_num++;
++out:
++	v4l2_m2m_job_finish(dev->m2m_dev, ctx->fh.m2m_ctx);
++}
++
++static void w4_device_run(void *priv)
++{
++	struct w4_ctx *ctx = priv;
++
++	queue_work(ctx->dev->wq, &ctx->run_work);
++}
++
++static const struct v4l2_m2m_ops w4_m2m_ops = {
++	.device_run = w4_device_run,
++};
++
++/* Formats */
++
++static void w4_fill_src(struct w4_q_data *q, u32 width, u32 height)
++{
++	q->fourcc = V4L2_PIX_FMT_NV12;
++	q->width = clamp_t(u32, ALIGN(width, 2), W4_MIN_W, W4_MAX_W);
++	q->height = clamp_t(u32, ALIGN(height, 2), W4_MIN_H, W4_MAX_H);
++	q->bytesperline = ALIGN(q->width, 32);
++	/* The encoder reads whole 8x8 blocks: keep the reads in the buffer */
++	q->sizeimage = q->bytesperline * q->height +
++		       q->bytesperline * ALIGN(q->height, 8) / 2;
++}
++
++static void w4_fill_dst(struct w4_q_data *q, u32 width, u32 height,
++			u32 sizeimage)
++{
++	q->fourcc = V4L2_PIX_FMT_HEVC;
++	q->width = clamp_t(u32, ALIGN(width, 2), W4_MIN_W, W4_MAX_W);
++	q->height = clamp_t(u32, ALIGN(height, 2), W4_MIN_H, W4_MAX_H);
++	q->bytesperline = 0;
++	q->sizeimage = PAGE_ALIGN(clamp_t(u32, sizeimage,
++					  max_t(u32, q->width * q->height / 4,
++						SZ_256K),
++					  q->width * q->height * 2));
++}
++
++static void w4_to_v4l2(struct w4_q_data *q, struct v4l2_pix_format *pix)
++{
++	pix->pixelformat = q->fourcc;
++	pix->width = q->width;
++	pix->height = q->height;
++	pix->bytesperline = q->bytesperline;
++	pix->sizeimage = q->sizeimage;
++	pix->field = V4L2_FIELD_NONE;
++	pix->colorspace = V4L2_COLORSPACE_REC709;
++	pix->ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
++	pix->quantization = V4L2_QUANTIZATION_DEFAULT;
++	pix->xfer_func = V4L2_XFER_FUNC_DEFAULT;
++}
++
++static int w4_querycap(struct file *file, void *priv,
++		       struct v4l2_capability *cap)
++{
++	strscpy(cap->driver, W4_NAME, sizeof(cap->driver));
++	strscpy(cap->card, "WAVE420L HEVC encoder", sizeof(cap->card));
++	return 0;
++}
++
++static int w4_enum_fmt_out(struct file *file, void *priv,
++			   struct v4l2_fmtdesc *f)
++{
++	if (f->index)
++		return -EINVAL;
++	f->pixelformat = V4L2_PIX_FMT_NV12;
++	return 0;
++}
++
++static int w4_enum_fmt_cap(struct file *file, void *priv,
++			   struct v4l2_fmtdesc *f)
++{
++	if (f->index)
++		return -EINVAL;
++	f->pixelformat = V4L2_PIX_FMT_HEVC;
++	f->flags = V4L2_FMT_FLAG_COMPRESSED;
++	return 0;
++}
++
++static int w4_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
++{
++	struct w4_ctx *ctx = fh_to_ctx(file_to_v4l2_fh(file));
++	int i = V4L2_TYPE_IS_OUTPUT(f->type) ? W4_SRC : W4_DST;
++
++	w4_to_v4l2(&ctx->q[i], &f->fmt.pix);
++	return 0;
++}
++
++static int w4_try_fmt_out(struct file *file, void *priv,
++			  struct v4l2_format *f)
++{
++	struct w4_q_data q;
++
++	w4_fill_src(&q, f->fmt.pix.width, f->fmt.pix.height);
++	w4_to_v4l2(&q, &f->fmt.pix);
++	return 0;
++}
++
++static int w4_try_fmt_cap(struct file *file, void *priv,
++			  struct v4l2_format *f)
++{
++	struct w4_ctx *ctx = fh_to_ctx(file_to_v4l2_fh(file));
++	struct w4_q_data q;
++
++	/* The coded size follows the source */
++	w4_fill_dst(&q, ctx->q[W4_SRC].width, ctx->q[W4_SRC].height,
++		    f->fmt.pix.sizeimage);
++	w4_to_v4l2(&q, &f->fmt.pix);
++	return 0;
++}
++
++static int w4_s_fmt_out(struct file *file, void *priv, struct v4l2_format *f)
++{
++	struct w4_ctx *ctx = fh_to_ctx(file_to_v4l2_fh(file));
++	struct vb2_queue *vq = v4l2_m2m_get_vq(ctx->fh.m2m_ctx, f->type);
++
++	if (vb2_is_busy(vq))
++		return -EBUSY;
++	w4_fill_src(&ctx->q[W4_SRC], f->fmt.pix.width, f->fmt.pix.height);
++	w4_to_v4l2(&ctx->q[W4_SRC], &f->fmt.pix);
++	w4_fill_dst(&ctx->q[W4_DST], ctx->q[W4_SRC].width,
++		    ctx->q[W4_SRC].height, ctx->q[W4_DST].sizeimage);
++	return 0;
++}
++
++static int w4_s_fmt_cap(struct file *file, void *priv, struct v4l2_format *f)
++{
++	struct w4_ctx *ctx = fh_to_ctx(file_to_v4l2_fh(file));
++	struct vb2_queue *vq = v4l2_m2m_get_vq(ctx->fh.m2m_ctx, f->type);
++
++	if (vb2_is_busy(vq))
++		return -EBUSY;
++	w4_fill_dst(&ctx->q[W4_DST], ctx->q[W4_SRC].width,
++		    ctx->q[W4_SRC].height, f->fmt.pix.sizeimage);
++	w4_to_v4l2(&ctx->q[W4_DST], &f->fmt.pix);
++	return 0;
++}
++
++static int w4_g_parm(struct file *file, void *priv, struct v4l2_streamparm *a)
++{
++	struct w4_ctx *ctx = fh_to_ctx(file_to_v4l2_fh(file));
++
++	if (!V4L2_TYPE_IS_OUTPUT(a->type))
++		return -EINVAL;
++	a->parm.output.capability = V4L2_CAP_TIMEPERFRAME;
++	a->parm.output.timeperframe.numerator = 1;
++	a->parm.output.timeperframe.denominator = ctx->fps;
++	return 0;
++}
++
++static int w4_s_parm(struct file *file, void *priv, struct v4l2_streamparm *a)
++{
++	struct w4_ctx *ctx = fh_to_ctx(file_to_v4l2_fh(file));
++	struct v4l2_fract *t = &a->parm.output.timeperframe;
++
++	if (!V4L2_TYPE_IS_OUTPUT(a->type))
++		return -EINVAL;
++	if (t->numerator && t->denominator)
++		ctx->fps = clamp_t(u32, t->denominator / t->numerator, 1, 240);
++	return w4_g_parm(file, priv, a);
++}
++
++static const struct v4l2_ioctl_ops w4_ioctl_ops = {
++	.vidioc_querycap = w4_querycap,
++	.vidioc_enum_fmt_vid_out = w4_enum_fmt_out,
++	.vidioc_enum_fmt_vid_cap = w4_enum_fmt_cap,
++	.vidioc_g_fmt_vid_out = w4_g_fmt,
++	.vidioc_g_fmt_vid_cap = w4_g_fmt,
++	.vidioc_try_fmt_vid_out = w4_try_fmt_out,
++	.vidioc_try_fmt_vid_cap = w4_try_fmt_cap,
++	.vidioc_s_fmt_vid_out = w4_s_fmt_out,
++	.vidioc_s_fmt_vid_cap = w4_s_fmt_cap,
++	.vidioc_g_parm = w4_g_parm,
++	.vidioc_s_parm = w4_s_parm,
++
++	.vidioc_reqbufs = v4l2_m2m_ioctl_reqbufs,
++	.vidioc_querybuf = v4l2_m2m_ioctl_querybuf,
++	.vidioc_qbuf = v4l2_m2m_ioctl_qbuf,
++	.vidioc_dqbuf = v4l2_m2m_ioctl_dqbuf,
++	.vidioc_expbuf = v4l2_m2m_ioctl_expbuf,
++	.vidioc_create_bufs = v4l2_m2m_ioctl_create_bufs,
++	.vidioc_prepare_buf = v4l2_m2m_ioctl_prepare_buf,
++	.vidioc_streamon = v4l2_m2m_ioctl_streamon,
++	.vidioc_streamoff = v4l2_m2m_ioctl_streamoff,
++
++	.vidioc_subscribe_event = v4l2_ctrl_subscribe_event,
++	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
++};
++
++/* Queues */
++
++static int w4_queue_setup(struct vb2_queue *vq, unsigned int *nbuffers,
++			  unsigned int *nplanes, unsigned int sizes[],
++			  struct device *alloc_devs[])
++{
++	struct w4_ctx *ctx = vb2_get_drv_priv(vq);
++	struct w4_q_data *q = &ctx->q[V4L2_TYPE_IS_OUTPUT(vq->type) ?
++				      W4_SRC : W4_DST];
++
++	if (*nplanes)
++		return sizes[0] < q->sizeimage ? -EINVAL : 0;
++	*nplanes = 1;
++	sizes[0] = q->sizeimage;
++	return 0;
++}
++
++static int w4_buf_prepare(struct vb2_buffer *vb)
++{
++	struct w4_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
++	struct w4_q_data *q = &ctx->q[V4L2_TYPE_IS_OUTPUT(vb->type) ?
++				      W4_SRC : W4_DST];
++
++	if (vb2_plane_size(vb, 0) < q->sizeimage)
++		return -EINVAL;
++	if (V4L2_TYPE_IS_OUTPUT(vb->type))
++		vb2_set_plane_payload(vb, 0, q->sizeimage);
++	return 0;
++}
++
++static void w4_buf_queue(struct vb2_buffer *vb)
++{
++	struct w4_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
++
++	v4l2_m2m_buf_queue(ctx->fh.m2m_ctx, to_vb2_v4l2_buffer(vb));
++}
++
++static void w4_return_bufs(struct w4_ctx *ctx, struct vb2_queue *vq,
++			   enum vb2_buffer_state state)
++{
++	struct vb2_v4l2_buffer *vb;
++
++	for (;;) {
++		if (V4L2_TYPE_IS_OUTPUT(vq->type))
++			vb = v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
++		else
++			vb = v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
++		if (!vb)
++			break;
++		v4l2_m2m_buf_done(vb, state);
++	}
++}
++
++static int w4_start_streaming(struct vb2_queue *vq, unsigned int count)
++{
++	struct w4_ctx *ctx = vb2_get_drv_priv(vq);
++	struct vb2_queue *other = v4l2_m2m_get_vq(ctx->fh.m2m_ctx,
++		V4L2_TYPE_IS_OUTPUT(vq->type) ? V4L2_BUF_TYPE_VIDEO_CAPTURE :
++						V4L2_BUF_TYPE_VIDEO_OUTPUT);
++	int ret;
++
++	/* Set the sequence up when both queues stream */
++	if (!vb2_is_streaming(other) || ctx->seq_ready)
++		return 0;
++	ret = w4_start_seq(ctx);
++	if (ret)
++		w4_return_bufs(ctx, vq, VB2_BUF_STATE_QUEUED);
++	return ret;
++}
++
++static void w4_stop_streaming(struct vb2_queue *vq)
++{
++	struct w4_ctx *ctx = vb2_get_drv_priv(vq);
++
++	w4_stop_seq(ctx);
++	w4_return_bufs(ctx, vq, VB2_BUF_STATE_ERROR);
++}
++
++static const struct vb2_ops w4_qops = {
++	.queue_setup = w4_queue_setup,
++	.buf_prepare = w4_buf_prepare,
++	.buf_queue = w4_buf_queue,
++	.start_streaming = w4_start_streaming,
++	.stop_streaming = w4_stop_streaming,
++};
++
++static int w4_queue_init(void *priv, struct vb2_queue *src_vq,
++			 struct vb2_queue *dst_vq)
++{
++	struct w4_ctx *ctx = priv;
++	int ret;
++
++	src_vq->type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
++	src_vq->io_modes = VB2_MMAP | VB2_DMABUF;
++	src_vq->drv_priv = ctx;
++	src_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
++	src_vq->ops = &w4_qops;
++	src_vq->mem_ops = &vb2_dma_contig_memops;
++	src_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
++	src_vq->lock = &ctx->dev->lock;
++	src_vq->dev = ctx->dev->dev;
++	ret = vb2_queue_init(src_vq);
++	if (ret)
++		return ret;
++
++	dst_vq->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
++	dst_vq->io_modes = VB2_MMAP | VB2_DMABUF;
++	dst_vq->drv_priv = ctx;
++	dst_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
++	dst_vq->ops = &w4_qops;
++	dst_vq->mem_ops = &vb2_dma_contig_memops;
++	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
++	dst_vq->lock = &ctx->dev->lock;
++	dst_vq->dev = ctx->dev->dev;
++	return vb2_queue_init(dst_vq);
++}
++
++/* Controls */
++
++static int w4_s_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct w4_ctx *ctx = container_of(ctrl->handler, struct w4_ctx, hdl);
++
++	switch (ctrl->id) {
++	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
++		ctx->gop_size = ctrl->val;
++		break;
++	case V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP:
++		ctx->qp_i = ctrl->val;
++		break;
++	case V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP:
++		ctx->qp_p = ctrl->val;
++		break;
++	case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
++		ctx->force_key = true;
++		break;
++	case V4L2_CID_MPEG_VIDEO_HEVC_PROFILE:
++	case V4L2_CID_MPEG_VIDEO_HEVC_LEVEL:
++		break;
++	default:
++		return -EINVAL;
++	}
++	return 0;
++}
++
++static const struct v4l2_ctrl_ops w4_ctrl_ops = {
++	.s_ctrl = w4_s_ctrl,
++};
++
++static int w4_init_ctrls(struct w4_ctx *ctx)
++{
++	struct v4l2_ctrl_handler *hdl = &ctx->hdl;
++
++	v4l2_ctrl_handler_init(hdl, 6);
++	v4l2_ctrl_new_std(hdl, &w4_ctrl_ops, V4L2_CID_MPEG_VIDEO_GOP_SIZE,
++			  0, 1000, 1, 30);
++	v4l2_ctrl_new_std(hdl, &w4_ctrl_ops,
++			  V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP, 0, 51, 1, 30);
++	v4l2_ctrl_new_std(hdl, &w4_ctrl_ops,
++			  V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP, 0, 51, 1, 30);
++	v4l2_ctrl_new_std(hdl, &w4_ctrl_ops,
++			  V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 0, 0, 0, 0);
++	v4l2_ctrl_new_std_menu(hdl, &w4_ctrl_ops,
++			       V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
++			       V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
++			       ~BIT(V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN),
++			       V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN);
++	v4l2_ctrl_new_std_menu(hdl, &w4_ctrl_ops,
++			       V4L2_CID_MPEG_VIDEO_HEVC_LEVEL,
++			       V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1, 0,
++			       V4L2_MPEG_VIDEO_HEVC_LEVEL_4_1);
++	if (hdl->error)
++		return hdl->error;
++	ctx->fh.ctrl_handler = hdl;
++	return v4l2_ctrl_handler_setup(hdl);
++}
++
++/* File operations */
++
++static int w4_open(struct file *file)
++{
++	struct w4_dev *dev = video_drvdata(file);
++	struct w4_ctx *ctx;
++	int ret;
++
++	ctx = kzalloc_obj(*ctx);
++	if (!ctx)
++		return -ENOMEM;
++	ctx->dev = dev;
++	ctx->inst = -1;
++	ctx->fps = 30;
++	INIT_WORK(&ctx->run_work, w4_run_work);
++	w4_fill_src(&ctx->q[W4_SRC], 1920, 1080);
++	w4_fill_dst(&ctx->q[W4_DST], 1920, 1080, 0);
++
++	v4l2_fh_init(&ctx->fh, video_devdata(file));
++	ret = w4_init_ctrls(ctx);
++	if (ret)
++		goto err;
++
++	ctx->fh.m2m_ctx = v4l2_m2m_ctx_init(dev->m2m_dev, ctx, w4_queue_init);
++	if (IS_ERR(ctx->fh.m2m_ctx)) {
++		ret = PTR_ERR(ctx->fh.m2m_ctx);
++		goto err;
++	}
++	v4l2_fh_add(&ctx->fh, file);
++	return 0;
++
++err:
++	v4l2_ctrl_handler_free(&ctx->hdl);
++	v4l2_fh_exit(&ctx->fh);
++	kfree(ctx);
++	return ret;
++}
++
++static int w4_release(struct file *file)
++{
++	struct w4_dev *dev = video_drvdata(file);
++	struct w4_ctx *ctx = fh_to_ctx(file_to_v4l2_fh(file));
++
++	mutex_lock(&dev->lock);
++	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
++	mutex_unlock(&dev->lock);
++	w4_stop_seq(ctx);
++	v4l2_ctrl_handler_free(&ctx->hdl);
++	v4l2_fh_del(&ctx->fh, file);
++	v4l2_fh_exit(&ctx->fh);
++	kfree(ctx);
++	return 0;
++}
++
++static const struct v4l2_file_operations w4_fops = {
++	.owner = THIS_MODULE,
++	.open = w4_open,
++	.release = w4_release,
++	.poll = v4l2_m2m_fop_poll,
++	.unlocked_ioctl = video_ioctl2,
++	.mmap = v4l2_m2m_fop_mmap,
++};
++
++/* Platform device */
++
++static int w4_probe(struct platform_device *pdev)
++{
++	static const char * const clk_names[] = {
++		"core", "apb", "axi", "src", "cfg",
++	};
++	struct device *d = &pdev->dev;
++	struct w4_dev *dev;
++	struct resource *res;
++	struct clk *clk;
++	int i, ret;
++
++	dev = devm_kzalloc(d, sizeof(*dev), GFP_KERNEL);
++	if (!dev)
++		return -ENOMEM;
++	dev->dev = d;
++	mutex_init(&dev->lock);
++	mutex_init(&dev->hw_lock);
++	init_completion(&dev->done);
++	ida_init(&dev->inst_ida);
++	platform_set_drvdata(pdev, dev);
++
++	dev->regs = devm_platform_ioremap_resource_byname(pdev, "regs");
++	if (IS_ERR(dev->regs))
++		return PTR_ERR(dev->regs);
++
++	/* The control block is shared with the coda driver: no request */
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "ctrl");
++	if (res) {
++		dev->ctrl = devm_ioremap(d, res->start, resource_size(res));
++		if (!dev->ctrl)
++			return -ENOMEM;
++	}
++
++	for (i = 0; i < ARRAY_SIZE(clk_names); i++) {
++		clk = devm_clk_get_enabled(d, clk_names[i]);
++		if (IS_ERR(clk))
++			return dev_err_probe(d, PTR_ERR(clk),
++					     "clock %s\n", clk_names[i]);
++	}
++
++	ret = dma_set_mask_and_coherent(d, DMA_BIT_MASK(32));
++	if (ret)
++		return ret;
++
++	dev->irq = platform_get_irq(pdev, 0);
++	if (dev->irq < 0)
++		return dev->irq;
++	ret = devm_request_irq(d, dev->irq, w4_irq, 0, W4_NAME, dev);
++	if (ret)
++		return ret;
++
++	dev->wq = alloc_ordered_workqueue(W4_NAME, 0);
++	if (!dev->wq)
++		return -ENOMEM;
++
++	ret = v4l2_device_register(d, &dev->v4l2_dev);
++	if (ret)
++		goto err_wq;
++
++	dev->m2m_dev = v4l2_m2m_init(&w4_m2m_ops);
++	if (IS_ERR(dev->m2m_dev)) {
++		ret = PTR_ERR(dev->m2m_dev);
++		goto err_v4l2;
++	}
++
++	strscpy(dev->vfd.name, "wave420l-encoder", sizeof(dev->vfd.name));
++	dev->vfd.fops = &w4_fops;
++	dev->vfd.ioctl_ops = &w4_ioctl_ops;
++	dev->vfd.release = video_device_release_empty;
++	dev->vfd.lock = &dev->lock;
++	dev->vfd.v4l2_dev = &dev->v4l2_dev;
++	dev->vfd.vfl_dir = VFL_DIR_M2M;
++	dev->vfd.device_caps = V4L2_CAP_VIDEO_M2M | V4L2_CAP_STREAMING;
++	video_set_drvdata(&dev->vfd, dev);
++
++	ret = video_register_device(&dev->vfd, VFL_TYPE_VIDEO, -1);
++	if (ret)
++		goto err_m2m;
++
++	dev_info(d, "%s registered as %s\n", dev->vfd.name,
++		 video_device_node_name(&dev->vfd));
++	return 0;
++
++err_m2m:
++	v4l2_m2m_release(dev->m2m_dev);
++err_v4l2:
++	v4l2_device_unregister(&dev->v4l2_dev);
++err_wq:
++	destroy_workqueue(dev->wq);
++	return ret;
++}
++
++static void w4_remove(struct platform_device *pdev)
++{
++	struct w4_dev *dev = platform_get_drvdata(pdev);
++
++	video_unregister_device(&dev->vfd);
++	v4l2_m2m_release(dev->m2m_dev);
++	v4l2_device_unregister(&dev->v4l2_dev);
++	destroy_workqueue(dev->wq);
++	w4_free(dev, &dev->common);
++	ida_destroy(&dev->inst_ida);
++}
++
++static const struct of_device_id w4_dt_ids[] = {
++	{ .compatible = "sophgo,sg2000-wave420l" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, w4_dt_ids);
++
++static struct platform_driver w4_driver = {
++	.probe = w4_probe,
++	.remove = w4_remove,
++	.driver = {
++		.name = W4_NAME,
++		.of_match_table = w4_dt_ids,
++	},
++};
++module_platform_driver(w4_driver);
++
++MODULE_DESCRIPTION("Chips&Media WAVE420L HEVC encoder for the Sophgo SG2000");
++MODULE_LICENSE("GPL");
++MODULE_FIRMWARE("monet.bin");
