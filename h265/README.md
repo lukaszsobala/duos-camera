@@ -27,8 +27,9 @@ without this work.
 
 - Driver source: `~/Software/armbian/linux-gc2083`, branch `wave420l`, on top
   of branch `coda980`.
-- Build fork: local branch `duos-h265-parked` (`680932cf`), on top of the
-  codec branch `duos-coda980` (`d98f027e`).
+- Build fork: local branch `duos-h265-parked` (`680932cf`), on top of
+  `d98f027e`. That commit has the same tree as the codec branch
+  `duos-coda980` at `f4df562b`: only two commit messages changed.
 - Firmware: the Cvitek `monet.bin` from the vendor SDK (no license), or the
   StarFive build (Chips&Media license: binary redistribution allowed, no
   reverse engineering). See [h265-test.md](h265-test.md).
