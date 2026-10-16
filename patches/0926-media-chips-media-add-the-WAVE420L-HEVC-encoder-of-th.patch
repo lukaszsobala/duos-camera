@@ -22,8 +22,8 @@ Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
  drivers/media/platform/chips-media/Makefile   |    1 +
  .../media/platform/chips-media/wave4/Kconfig  |   14 +
  .../media/platform/chips-media/wave4/Makefile |    2 +
- .../platform/chips-media/wave4/wave420l.c     | 1498 +++++++++++++++++
- 5 files changed, 1516 insertions(+)
+ .../platform/chips-media/wave4/wave420l.c     | 1589 +++++++++++++++++
+ 5 files changed, 1607 insertions(+)
  create mode 100644 drivers/media/platform/chips-media/wave4/Kconfig
  create mode 100644 drivers/media/platform/chips-media/wave4/Makefile
  create mode 100644 drivers/media/platform/chips-media/wave4/wave420l.c
@@ -78,10 +78,10 @@ index 0000000..a12b291
 +obj-$(CONFIG_VIDEO_WAVE420L) += wave420l.o
 diff --git a/drivers/media/platform/chips-media/wave4/wave420l.c b/drivers/media/platform/chips-media/wave4/wave420l.c
 new file mode 100644
-index 0000000..3751957
+index 0000000..5cbc46f
 --- /dev/null
 +++ b/drivers/media/platform/chips-media/wave4/wave420l.c
-@@ -0,0 +1,1498 @@
+@@ -0,0 +1,1589 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Chips&Media WAVE420L HEVC encoder, as in the Sophgo SG2000
@@ -121,6 +121,7 @@ index 0000000..3751957
 +#define W4_VCPU_CUR_PC			0x0004
 +#define W4_VPU_FIO_CTRL			0x0020
 +#define W4_VPU_FIO_DATA			0x0024
++#define W4_VPU_VINT_REASON_USR		0x0030
 +#define W4_VPU_VINT_REASON_CLR		0x0034
 +#define W4_VPU_HOST_INT_REQ		0x0038
 +#define W4_VPU_VINT_CLEAR		0x003c
@@ -135,6 +136,11 @@ index 0000000..3751957
 +#define W4_VPU_REMAP_CORE_START		0x006c
 +#define W4_VPU_BUSY_STATUS		0x0070
 +#define W4_PRODUCT_NUMBER		0x1044
++#define W4_RST_BLOCK_ALL		0xfffffff
++
++/* VPU internals, through the FIO window: the bus interface (GDI) */
++#define W4_GDI_BUS_CTRL			0x88f0
++#define W4_GDI_BUS_STATUS		0x88f4
 +
 +/* Command block: the meaning of most registers depends on the command */
 +#define W4_COMMAND			0x0100
@@ -206,6 +212,13 @@ index 0000000..3751957
 +#define W4_RET_ENC_MIN_FB_NUM		0x01cc
 +#define W4_RET_ENC_MIN_SRC_BUF_NUM	0x01d8
 +
++/* SET_PARAM, option CUSTOM_GOP */
++#define W4_OPT_CUSTOM_GOP		1
++#define W4_CUSTOM_GOP_PARAM		0x0160
++#define W4_CUSTOM_GOP_PIC_PARAM(i)	(0x0164 + (i) * 4)
++#define W4_CUSTOM_GOP_PIC_LAMBDA(i)	(0x0188 + (i) * 4)
++#define W4_MAX_GOP_NUM			8
++
 +/* SET_FRAMEBUF */
 +#define W4_COMMON_PIC_INFO		0x0120
 +#define W4_PIC_SIZE			0x0124
@@ -271,12 +284,15 @@ index 0000000..3751957
 +/* 128-bit little endian: the stream and source endian fields take ~0 */
 +#define W4_ENDIAN_128BIT_LE		0xf
 +
-+/* CODE_OPTION: headers when the firmware sees the need, then the picture */
-+#define W4_CODEOPT_HEADER_IMPLICIT	BIT(0)
++/* CODE_OPTION: what ENC_PIC writes */
 +#define W4_CODEOPT_VCL			BIT(1)
++#define W4_CODEOPT_VPS			BIT(2)
++#define W4_CODEOPT_SPS			BIT(3)
++#define W4_CODEOPT_PPS			BIT(4)
 +
-+/* GOP preset 2: I, then consecutive P pictures */
-+#define W4_GOP_PRESET_IPP		2
++/* Custom GOP of one P picture: I, then consecutive P pictures */
++#define W4_GOP_PRESET_CUSTOM		0
++#define W4_PIC_TYPE_P			1
 +#define W4_REFRESH_IDR			2
 +#define W4_PIC_TYPE_IDR			3
 +
@@ -478,6 +494,42 @@ index 0000000..3751957
 +	return w4_read(dev, W4_VPU_FIO_DATA);
 +}
 +
++static void w4_fio_write(struct w4_dev *dev, u32 addr, u32 val)
++{
++	w4_write(dev, val, W4_VPU_FIO_DATA);
++	w4_write(dev, (addr & 0xffff) | BIT(16), W4_VPU_FIO_CTRL);
++}
++
++/*
++ * Reset all VPU blocks. Like the vendor driver, first stop the bus requests
++ * and let the open bus transactions end: a reset in the middle of a
++ * transaction can hold the bus that the H.264 core also uses.
++ */
++static int w4_reset(struct w4_dev *dev)
++{
++	bool bus_ctrl = w4_fio_read(dev, W4_GDI_BUS_CTRL) >> 24 == 1;
++	u32 val;
++	int ret;
++
++	w4_write(dev, 0, W4_VPU_BUSY_STATUS);
++	if (bus_ctrl) {
++		w4_fio_write(dev, W4_GDI_BUS_CTRL, 0x11);
++		if (read_poll_timeout(w4_fio_read, val, !val, 10,
++				      W4_TIMEOUT_MS * USEC_PER_MSEC, false, dev,
++				      W4_GDI_BUS_STATUS))
++			dev_warn(dev->dev, "bus not idle: 0x%x\n", val);
++	}
++	w4_write(dev, W4_RST_BLOCK_ALL, W4_VPU_RESET_REQ);
++	ret = readl_poll_timeout(dev->regs + W4_VPU_RESET_STATUS, val, !val,
++				 10, W4_TIMEOUT_MS * USEC_PER_MSEC);
++	w4_write(dev, 0, W4_VPU_RESET_REQ);
++	if (bus_ctrl)
++		w4_fio_write(dev, W4_GDI_BUS_CTRL, 0);
++	if (ret)
++		dev_err(dev->dev, "reset timeout\n");
++	return ret;
++}
++
 +/* Show where the VPU stopped. The vendor driver dumps the same registers. */
 +static void w4_dump_hang(struct w4_dev *dev)
 +{
@@ -485,10 +537,10 @@ index 0000000..3751957
 +
 +	usleep_range(10, 20);
 +	dev_err(dev->dev,
-+		"hang: PC 0x%x 0x%x, BIT PC 0x%x, CTU %u,%u, CTU FSM 0x%x, bus 0x%x, rd 0x%x, wr 0x%x\n",
++		"hang: PC 0x%x 0x%x, BIT PC 0x%x, bus status 0x%x, reasons 0x%x, rd 0x%x, wr 0x%x\n",
 +		pc, w4_read(dev, W4_VCPU_CUR_PC), w4_fio_read(dev, 0x8018),
-+		w4_fio_read(dev, 0x8040), w4_fio_read(dev, 0x8044),
-+		w4_fio_read(dev, 0x8048), w4_fio_read(dev, 0x8068),
++		w4_fio_read(dev, W4_GDI_BUS_STATUS),
++		w4_read(dev, W4_VPU_VINT_REASON_USR),
 +		w4_read(dev, W4_BS_RD_PTR), w4_read(dev, W4_BS_WR_PTR));
 +}
 +
@@ -508,6 +560,8 @@ index 0000000..3751957
 +		dev_warn_once(dev->dev, "command 0x%x: done without IRQ\n",
 +			      cmd);
 +	}
++	/* Acknowledge the reasons to the firmware too */
++	w4_write(dev, 0, W4_VPU_VINT_REASON_USR);
 +	return dev->int_reason;
 +}
 +
@@ -577,6 +631,9 @@ index 0000000..3751957
 +
 +	w4_claim_sram(dev);
 +
++	ret = w4_reset(dev);
++	if (ret)
++		return ret;
 +	w4_write(dev, 0, W4_PO_CONF);
 +	w4_write(dev, 0x7ffffff, W4_VPU_RESET_REQ);
 +	ret = readl_poll_timeout(dev->regs + W4_VPU_RESET_STATUS, val, !val,
@@ -589,6 +646,7 @@ index 0000000..3751957
 +
 +	for (i = W4_COMMAND; i < 0x200; i += 4)
 +		w4_write(dev, 0, i);
++	w4_write(dev, 0, W4_VPU_VINT_REASON_USR);
 +
 +	/* Map the code at VPU address 0 */
 +	w4_write(dev, BIT(31) | BIT(11) | ((W4_CODE_BUF_SIZE >> 12) & 0x1ff),
@@ -665,12 +723,29 @@ index 0000000..3751957
 +	w4_write(dev, W4_ENDIAN_128BIT_LE, W4_BS_PARAM);
 +}
 +
++/* Run SET_PARAM with the registers set by the caller */
++static int w4_set_param_cmd(struct w4_ctx *ctx)
++{
++	struct w4_dev *dev = ctx->dev;
++	int reason;
++
++	reason = w4_cmd_irq(dev, ctx->inst, W4_CMD_SET_PARAM);
++	if (reason < 0)
++		return reason;
++	if (!w4_read(dev, W4_RET_SUCCESS)) {
++		dev_err(dev->dev, "SET_PARAM failed: reason 0x%x\n",
++			w4_read(dev, W4_RET_FAIL_REASON));
++		return -EIO;
++	}
++	return 0;
++}
++
 +static int w4_set_param(struct w4_ctx *ctx)
 +{
 +	struct w4_dev *dev = ctx->dev;
 +	struct w4_q_data *src = &ctx->q[W4_SRC];
 +	u32 w8 = ALIGN(src->width, 8), h8 = ALIGN(src->height, 8);
-+	int reason;
++	int i, ret;
 +
 +	w4_set_bitstream(dev, ctx->hdr.dma, ctx->hdr.size);
 +	w4_set_buffers(ctx);
@@ -680,18 +755,17 @@ index 0000000..3751957
 +	w4_write(dev, h8 << 16 | w8, W4_SEQ_SRC_SIZE);
 +	/* Main profile, level from the firmware, 8 bit, 4:2:0 */
 +	w4_write(dev, 1 | 8 << 14, W4_SEQ_PIC_PARAM);
-+	w4_write(dev, W4_GOP_PRESET_IPP | 30 << 9 | 33 << 15 | 36 << 21,
++	w4_write(dev, W4_GOP_PRESET_CUSTOM | 30 << 9 | 33 << 15 | 36 << 21,
 +		 W4_SEQ_GOP_PARAM);
 +	w4_write(dev, 1 << 16, W4_SEQ_LAYER_PERIOD);
-+	/* No rate control */
++	/* No rate control: the I and P QPs are constant */
 +	w4_write(dev, BIT(2) | BIT(3) | 2 << 4 | 1 << 7 | 1 << 9 | 63 << 14,
 +		 W4_RC_PARAM);
 +	/*
-+	 * IDR refresh, headers with every IDR picture. The driver forces the
-+	 * IDR pictures, like the vendor driver: intra period 0.
++	 * IDR refresh. The driver forces the IDR pictures, like the vendor
++	 * driver: intra period 0.
 +	 */
-+	w4_write(dev, W4_REFRESH_IDR | ctx->qp_i << 3 | BIT(9),
-+		 W4_SEQ_INTRA_PARAM);
++	w4_write(dev, W4_REFRESH_IDR | ctx->qp_i << 3, W4_SEQ_INTRA_PARAM);
 +	w4_write(dev, (h8 - src->height) << 16, W4_SEQ_CONF_WIN_TOP_BOT);
 +	w4_write(dev, (w8 - src->width) << 16, W4_SEQ_CONF_WIN_LEFT_RIGHT);
 +	w4_write(dev, ctx->fps, W4_SEQ_FRAME_RATE);
@@ -708,25 +782,36 @@ index 0000000..3751957
 +	w4_write(dev, 8 | 51 << 6 | 10 << 12, W4_RC_MIN_MAX_QP);
 +	w4_write(dev, 0x01010101, W4_RC_BIT_RATIO_LAYER_0_3);
 +	w4_write(dev, 0x01010101, W4_RC_BIT_RATIO_LAYER_4_7);
-+	w4_write(dev, BIT(3), W4_NR_PARAM);		/* noise estimation */
++	w4_write(dev, 0, W4_NR_PARAM);
 +	w4_write(dev, 7 | 7 << 5 | 7 << 10 | 4 << 15 | 4 << 20 | 4 << 25,
 +		 W4_NR_WEIGHT);
 +	w4_write(dev, 0, W4_RC_TARGET_RATE);
-+	w4_write(dev, 51000000, W4_RC_TRANS_RATE);
++	w4_write(dev, 0, W4_RC_TRANS_RATE);
 +	w4_write(dev, 0, W4_ROT_PARAM);
 +	w4_write(dev, 0, W4_NUM_UNITS_IN_TICK);
 +	w4_write(dev, 0, W4_TIME_SCALE);
 +	w4_write(dev, 0, W4_NUM_TICKS_POC_DIFF_ONE);
++	ret = w4_set_param_cmd(ctx);
++	if (ret)
++		return ret;
 +
-+	reason = w4_cmd_irq(dev, ctx->inst, W4_CMD_SET_PARAM);
-+	if (reason < 0)
-+		return reason;
-+	if (!w4_read(dev, W4_RET_SUCCESS)) {
-+		dev_err(dev->dev, "SET_PARAM failed: reason 0x%x\n",
-+			w4_read(dev, W4_RET_FAIL_REASON));
-+		return -EIO;
-+	}
++	/* The GOP: one P picture, POC + 1, reference POC 0, at the P QP */
++	w4_set_bitstream(dev, ctx->hdr.dma, ctx->hdr.size);
++	w4_set_buffers(ctx);
++	w4_write(dev, W4_OPT_CUSTOM_GOP, W4_COMMAND_OPTION);
++	w4_write(dev, 0xffffffff, W4_SET_PARAM_ENABLE);
++	w4_write(dev, 1, W4_CUSTOM_GOP_PARAM);
++	w4_write(dev, W4_PIC_TYPE_P | 1 << 2 | ctx->qp_p << 6,
++		 W4_CUSTOM_GOP_PIC_PARAM(0));
++	for (i = 1; i < W4_MAX_GOP_NUM; i++)
++		w4_write(dev, 0, W4_CUSTOM_GOP_PIC_PARAM(i));
++	for (i = 0; i < W4_MAX_GOP_NUM; i++)
++		w4_write(dev, 0, W4_CUSTOM_GOP_PIC_LAMBDA(i));
++	ret = w4_set_param_cmd(ctx);
++	if (ret)
++		return ret;
 +
++	/* Known only after the GOP */
 +	ctx->num_fbs = w4_read(dev, W4_RET_ENC_MIN_FB_NUM);
 +	w4_dbg(dev, "SET_PARAM: %u frame buffers, %u source buffers\n",
 +	       ctx->num_fbs, w4_read(dev, W4_RET_ENC_MIN_SRC_BUF_NUM));
@@ -915,7 +1000,7 @@ index 0000000..3751957
 +	struct vb2_v4l2_buffer *src, *dst;
 +	enum vb2_buffer_state state = VB2_BUF_STATE_ERROR;
 +	dma_addr_t y, c, out;
-+	u32 pic_param, size = 0, rd, wr, bytes, nut;
++	u32 pic_param, code_option, size = 0, rd, wr, bytes, nut;
 +	bool idr;
 +	int reason;
 +
@@ -937,10 +1022,14 @@ index 0000000..3751957
 +		ctx->frame_num = 0;
 +	ctx->force_key = false;
 +
-+	/* Constant QP; IDR pictures forced by the driver */
-+	pic_param = BIT(1) | ctx->qp_i << 2 | ctx->qp_p << 8 | ctx->qp_p << 14;
++	/*
++	 * IDR pictures forced by the driver, with VPS, SPS and PPS before
++	 * them. The QPs come from SET_PARAM.
++	 */
++	pic_param = idr ? BIT(20) | W4_PIC_TYPE_IDR << 21 : 0;
++	code_option = W4_CODEOPT_VCL;
 +	if (idr)
-+		pic_param |= BIT(20) | W4_PIC_TYPE_IDR << 21;
++		code_option |= W4_CODEOPT_VPS | W4_CODEOPT_SPS | W4_CODEOPT_PPS;
 +
 +	mutex_lock(&dev->hw_lock);
 +	w4_claim_sram(dev);
@@ -949,10 +1038,10 @@ index 0000000..3751957
 +	w4_write(dev, 0, W4_ENC_ADDR_REPORT_BASE);
 +	w4_write(dev, 0, W4_ENC_REPORT_SIZE);
 +	w4_write(dev, 0, W4_ENC_REPORT_PARAM);
-+	w4_write(dev, W4_CODEOPT_HEADER_IMPLICIT | W4_CODEOPT_VCL,
-+		 W4_ENC_CODE_OPTION);
++	w4_write(dev, code_option, W4_ENC_CODE_OPTION);
 +	w4_write(dev, pic_param, W4_ENC_PIC_PARAM);
-+	w4_write(dev, src->vb2_buf.index, W4_ENC_SRC_PIC_IDX);
++	/* One source buffer at a time: no encoding delay with this GOP */
++	w4_write(dev, 0, W4_ENC_SRC_PIC_IDX);
 +	w4_write(dev, y, W4_ENC_SRC_ADDR_Y);
 +	w4_write(dev, c, W4_ENC_SRC_ADDR_U);
 +	w4_write(dev, c, W4_ENC_SRC_ADDR_V);
@@ -978,12 +1067,14 @@ index 0000000..3751957
 +
 +	/*
 +	 * After a timeout or a full output buffer the VPU still works on the
-+	 * picture. Stop this stream; the next stream boots the VPU again.
++	 * picture. Reset it, and stop this stream; the next stream boots the
++	 * VPU again.
 +	 */
 +	reason = w4_cmd_irq(dev, ctx->inst, W4_CMD_ENC_PIC);
 +	if (reason < 0 || reason & BIT(W4_INT_BSBUF_FULL)) {
 +		dev_err(dev->dev, "ENC_PIC: %s; stop the stream\n",
 +			reason < 0 ? "no answer" : "output buffer full");
++		w4_reset(dev);
 +		dev->booted = false;
 +		ctx->broken = true;
 +		goto unlock;

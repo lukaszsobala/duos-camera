@@ -18,9 +18,8 @@ cores share the SRAM. Patch 0927 adds the H.265 node to
 Build fork, local branch `duos-coda980`, commit "sophgo-sg200x: add the
 WAVE420L H.265 encoder". Driver source: `~/Software/armbian/linux-gc2083`,
 branch `wave420l`. The kernel debs are in `output/debs/`, built on
-2026-10-16 21:36, hash part `Pc2fe`:
-`linux-image-edge-sophgo-sg200x-riscv64_*Pc2fe*` and
-`linux-dtb-edge-sophgo-sg200x-riscv64_*Pc2fe*`, version 7.2.11.
+2026-10-16 23:32, hash part `P1edb` (`linux-image-edge-sophgo-sg200x-riscv64_*`
+and `linux-dtb-edge-sophgo-sg200x-riscv64_*`), version 7.2.11.
 
 ## Board setup
 
@@ -30,6 +29,15 @@ branch `wave420l`. The kernel debs are in `output/debs/`, built on
        scp ~/Software/armbian/duo-buildroot-sdk-v2/device/generic/rootfs_overlay/common/usr/share/fw_vcodec/monet.bin root@<board>:/lib/firmware/
 
    md5 `202043a809fdfa607a2d01d179aa7c3d`. It has no license file.
+
+   Second choice: the StarFive build of the same firmware, with a
+   Chips&Media license that allows binary redistribution (no reverse
+   engineering). The driver tries `v4l-wave420l-sg2000.bin` first:
+
+       wget -O /lib/firmware/v4l-wave420l-sg2000.bin https://raw.githubusercontent.com/starfive-tech/soft_3rdpart/b60da16be1b36453aa46599889c28310fd148fb8/wave420l/firmware/monet.bin
+       md5sum /lib/firmware/v4l-wave420l-sg2000.bin   # dbfaf48e103e1bf7f1101b49c5e3bbde
+
+   Remove that file to go back to the Cvitek build.
 3. `/boot/armbianEnv.txt` does not change: `overlays=camera-j1-gc2083
    video-codec`.
 4. Copy `cam2h264.c`, `h264-rtsp.c`, `j1-stream.sh`, `j1-h264.sh` and
@@ -139,3 +147,22 @@ output. Put `file.h265` and `out.h265` in `~/Downloads`.
 
 Next kernel (Pc2fe): the line buffers go to the SRAM, like in the vendor
 driver. A hang prints the VPU state on a `hang:` line.
+
+### 2026-10-16, kernel Pc2fe (SRAM)
+
+- ENC_PIC still hangs. The VPU CPU loops at PC 0x1834-0x1840.
+- Later the command ends with fail reason 0x8000,
+  `WAVE4_SYSERR_WATCHDOG_TIMEOUT`: the encoder hardware did not finish.
+- After the hang, H.264 failed until a reboot.
+- Not the cause: control register 0x28 (vendor writes 7), the clocks
+  VC_SRC1 and VC_SRC2, the codec MMU (0x40 = 3, off), the slice buffer
+  mode, the reset lines. The bus interface (GDI) shows no error.
+- The vendor register sequence matches. Found later: a WAVE420L driver for
+  the Amlogic SM1 that works on hardware
+  (github.com/ray38080289/meson-sm1-codecs, `venc-hevc/w4enc.c`). It
+  differs: it clears `VINT_REASON_USR` after each interrupt, uses a custom
+  GOP, and asks for VPS/SPS/PPS explicitly.
+
+Next kernel: the command sequence of the Amlogic driver, and the vendor
+bus drain before each reset. A hang now resets the VPU, so H.264 must
+work after it without a reboot.
