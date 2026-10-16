@@ -9,8 +9,9 @@ is the WAVE4 one: the boot and remap registers are the WAVE5 ones, but
 the commands and the command registers are different.
 
 Add a V4L2 mem2mem encoder: NV12 in, HEVC Main out, at constant QP,
-with an IDR picture every GOP. The secondary AXI (the codec SRAM) is not
-used. The driver loads the vendor firmware, monet.bin.
+with an IDR picture every GOP. The line buffers go to the codec SRAM,
+like in the vendor driver. The driver loads the vendor firmware,
+monet.bin.
 
 The register sequence follows Sophgo's vendor driver.
 
@@ -21,8 +22,8 @@ Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
  drivers/media/platform/chips-media/Makefile   |    1 +
  .../media/platform/chips-media/wave4/Kconfig  |   14 +
  .../media/platform/chips-media/wave4/Makefile |    2 +
- .../platform/chips-media/wave4/wave420l.c     | 1439 +++++++++++++++++
- 5 files changed, 1457 insertions(+)
+ .../platform/chips-media/wave4/wave420l.c     | 1498 +++++++++++++++++
+ 5 files changed, 1516 insertions(+)
  create mode 100644 drivers/media/platform/chips-media/wave4/Kconfig
  create mode 100644 drivers/media/platform/chips-media/wave4/Makefile
  create mode 100644 drivers/media/platform/chips-media/wave4/wave420l.c
@@ -77,16 +78,16 @@ index 0000000..a12b291
 +obj-$(CONFIG_VIDEO_WAVE420L) += wave420l.o
 diff --git a/drivers/media/platform/chips-media/wave4/wave420l.c b/drivers/media/platform/chips-media/wave4/wave420l.c
 new file mode 100644
-index 0000000..b4d7fa1
+index 0000000..3751957
 --- /dev/null
 +++ b/drivers/media/platform/chips-media/wave4/wave420l.c
-@@ -0,0 +1,1439 @@
+@@ -0,0 +1,1498 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Chips&Media WAVE420L HEVC encoder, as in the Sophgo SG2000
 + *
 + * NV12 in, HEVC Main out, at constant QP, with an IDR picture every GOP.
-+ * The secondary AXI (the codec SRAM) is not used.
++ * The line buffers go to the codec SRAM, like in the vendor driver.
 + *
 + * The firmware and the register sequence come from Sophgo's vendor driver
 + * (duo-buildroot-sdk-v2, osdrv/interdrv/cvi_vc_drv/vcodec/vpuapi/wave).
@@ -117,6 +118,9 @@ index 0000000..b4d7fa1
 +
 +/* Host interface */
 +#define W4_PO_CONF			0x0000
++#define W4_VCPU_CUR_PC			0x0004
++#define W4_VPU_FIO_CTRL			0x0020
++#define W4_VPU_FIO_DATA			0x0024
 +#define W4_VPU_VINT_REASON_CLR		0x0034
 +#define W4_VPU_HOST_INT_REQ		0x0038
 +#define W4_VPU_VINT_CLEAR		0x003c
@@ -169,6 +173,9 @@ index 0000000..b4d7fa1
 +#define W4_ADDR_SEC_AXI			0x0150
 +#define W4_SEC_AXI_SIZE			0x0154
 +#define W4_USE_SEC_AXI			0x0158
++#define W4_SEC_AXI_IMD			BIT(9)
++#define W4_SEC_AXI_RDO			BIT(11)
++#define W4_SEC_AXI_LF			BIT(15)
 +
 +/* SET_PARAM, option COMMON */
 +#define W4_SET_PARAM_ENABLE		0x015c
@@ -289,6 +296,8 @@ index 0000000..b4d7fa1
 +/* The codec control block that the SG2000 codecs share */
 +#define SG2000_VC_SRAM_SHARE		0x24
 +#define SG2000_VC_SRAM_TO_H265		2
++/* The H.265 part of the codec SRAM, at address 0 of the secondary AXI */
++#define SG2000_VC_SRAM_H265_SIZE	0x17a00
 +
 +enum { W4_SRC, W4_DST };
 +
@@ -344,6 +353,8 @@ index 0000000..b4d7fa1
 +	u32 fps;
 +
 +	int inst;
++	/* The line buffers in the codec SRAM; 0: no SRAM */
++	u32 sram_size;
 +	bool seq_ready;
 +	/* The VPU hung on a picture of this sequence */
 +	bool broken;
@@ -360,6 +371,10 @@ index 0000000..b4d7fa1
 +static int w4_debug;
 +module_param_named(debug, w4_debug, int, 0644);
 +MODULE_PARM_DESC(debug, "1: log each sequence and picture");
++
++static bool w4_sram = true;
++module_param_named(sram, w4_sram, bool, 0644);
++MODULE_PARM_DESC(sram, "Put the line buffers in the codec SRAM (default: on)");
 +
 +#define w4_dbg(w4, fmt, ...)						\
 +	do {								\
@@ -451,6 +466,32 @@ index 0000000..b4d7fa1
 +	return 0;
 +}
 +
++/* Read a register of the VPU internals */
++static u32 w4_fio_read(struct w4_dev *dev, u32 addr)
++{
++	u32 val;
++
++	w4_write(dev, addr & 0xffff, W4_VPU_FIO_CTRL);
++	if (readl_poll_timeout(dev->regs + W4_VPU_FIO_CTRL, val, val & BIT(31),
++			       1, 1000))
++		return ~0U;
++	return w4_read(dev, W4_VPU_FIO_DATA);
++}
++
++/* Show where the VPU stopped. The vendor driver dumps the same registers. */
++static void w4_dump_hang(struct w4_dev *dev)
++{
++	u32 pc = w4_read(dev, W4_VCPU_CUR_PC);
++
++	usleep_range(10, 20);
++	dev_err(dev->dev,
++		"hang: PC 0x%x 0x%x, BIT PC 0x%x, CTU %u,%u, CTU FSM 0x%x, bus 0x%x, rd 0x%x, wr 0x%x\n",
++		pc, w4_read(dev, W4_VCPU_CUR_PC), w4_fio_read(dev, 0x8018),
++		w4_fio_read(dev, 0x8040), w4_fio_read(dev, 0x8044),
++		w4_fio_read(dev, 0x8048), w4_fio_read(dev, 0x8068),
++		w4_read(dev, W4_BS_RD_PTR), w4_read(dev, W4_BS_WR_PTR));
++}
++
 +/* Run a command that ends with an interrupt. Return the reason, or < 0. */
 +static int w4_cmd_irq(struct w4_dev *dev, int inst, u32 cmd)
 +{
@@ -461,6 +502,7 @@ index 0000000..b4d7fa1
 +					 msecs_to_jiffies(W4_TIMEOUT_MS))) {
 +		if (w4_read(dev, W4_VPU_BUSY_STATUS)) {
 +			dev_err(dev->dev, "command 0x%x: timeout\n", cmd);
++			w4_dump_hang(dev);
 +			return -ETIMEDOUT;
 +		}
 +		dev_warn_once(dev->dev, "command 0x%x: done without IRQ\n",
@@ -588,13 +630,24 @@ index 0000000..b4d7fa1
 +	return 0;
 +}
 +
++/*
++ * The line buffers, in the vendor order: IMD, LF (5 luma and 3 chroma
++ * lines at 8 bit), RDO
++ */
++static u32 w4_sram_size(u32 width)
++{
++	return ALIGN(width, 32) + ALIGN(width, 64) * 8 +
++	       ALIGN(width, 64) / 32 * 22 * 16;
++}
++
 +static void w4_set_buffers(struct w4_ctx *ctx)
 +{
 +	struct w4_dev *dev = ctx->dev;
 +
 +	w4_write(dev, 0, W4_ADDR_SEC_AXI);
-+	w4_write(dev, 0, W4_SEC_AXI_SIZE);
-+	w4_write(dev, 0, W4_USE_SEC_AXI);
++	w4_write(dev, ctx->sram_size, W4_SEC_AXI_SIZE);
++	w4_write(dev, ctx->sram_size ? W4_SEC_AXI_IMD | W4_SEC_AXI_RDO |
++		 W4_SEC_AXI_LF : 0, W4_USE_SEC_AXI);
 +	w4_write(dev, ctx->work.dma, W4_ADDR_WORK_BASE);
 +	w4_write(dev, ctx->work.size, W4_WORK_SIZE);
 +	w4_write(dev, 0, W4_WORK_PARAM);
@@ -791,6 +844,12 @@ index 0000000..b4d7fa1
 +	if (ret)
 +		goto err;
 +
++	/* Without the control block, the SRAM can belong to the H.264 core */
++	ctx->sram_size = 0;
++	if (w4_sram && dev->ctrl &&
++	    w4_sram_size(ctx->q[W4_SRC].width) <= SG2000_VC_SRAM_H265_SIZE)
++		ctx->sram_size = w4_sram_size(ctx->q[W4_SRC].width);
++
 +	mutex_lock(&dev->hw_lock);
 +	ret = w4_boot(dev);
 +	if (ret)
@@ -816,8 +875,9 @@ index 0000000..b4d7fa1
 +
 +	ctx->frame_num = 0;
 +	ctx->seq_ready = true;
-+	w4_dbg(dev, "instance %d: %ux%u, %u frame buffers\n", ctx->inst,
-+	       ctx->q[W4_SRC].width, ctx->q[W4_SRC].height, ctx->num_fbs);
++	w4_dbg(dev, "instance %d: %ux%u, %u frame buffers, SRAM %u bytes\n",
++	       ctx->inst, ctx->q[W4_SRC].width, ctx->q[W4_SRC].height,
++	       ctx->num_fbs, ctx->sram_size);
 +	return 0;
 +
 +err_unlock:

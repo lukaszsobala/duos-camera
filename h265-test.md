@@ -5,19 +5,22 @@ Goal: encode the J1 camera to H.265 with the SoC's H.265 encoder.
 The SG2000 H.265 encoder is a Chips&Media WAVE420L. Mainline has no driver
 for it. Mainline `wave5` drives the WAVE5 family, which has other commands.
 Patch 0926 adds a new driver, `wave420l`: NV12 in, HEVC Main out, constant
-QP, an IDR picture every GOP, no SRAM. The register sequence follows the
-vendor driver (`duo-buildroot-sdk-v2/osdrv/interdrv/cvi_vc_drv/vcodec/vpuapi/wave`).
+QP, an IDR picture every GOP, line buffers in the codec SRAM. The register
+sequence follows the vendor driver (`duo-buildroot-sdk-v2/osdrv/interdrv/cvi_vc_drv/vcodec/vpuapi/wave`).
 
 Patch 0925 makes coda give the shared SRAM back to the H.264 core before
-each H.264 picture. Patch 0927 adds the H.265 node to `overlays=video-codec`.
+each H.264 picture. Do not run H.264 and H.265 at the same time: the
+cores share the SRAM. Patch 0927 adds the H.265 node to
+`overlays=video-codec`.
 
 ## Build
 
 Build fork, local branch `duos-coda980`, commit "sophgo-sg200x: add the
 WAVE420L H.265 encoder". Driver source: `~/Software/armbian/linux-gc2083`,
 branch `wave420l`. The kernel debs are in `output/debs/`, built on
-2026-10-16: `linux-image-edge-sophgo-sg200x-riscv64_*` and
-`linux-dtb-edge-sophgo-sg200x-riscv64_*`, version 7.2.11.
+2026-10-16 21:36, hash part `Pc2fe`:
+`linux-image-edge-sophgo-sg200x-riscv64_*Pc2fe*` and
+`linux-dtb-edge-sophgo-sg200x-riscv64_*Pc2fe*`, version 7.2.11.
 
 ## Board setup
 
@@ -30,7 +33,8 @@ branch `wave420l`. The kernel debs are in `output/debs/`, built on
 3. `/boot/armbianEnv.txt` does not change: `overlays=camera-j1-gc2083
    video-codec`.
 4. Copy `cam2h264.c`, `h264-rtsp.c`, `j1-stream.sh`, `j1-h264.sh` and
-   `j1-rtsp.sh` to one directory, and build there:
+   `j1-rtsp.sh` to one directory, and build there. Copy all of them again
+   after a change: an old `j1-rtsp.sh` starts the server as H.264.
 
        gcc -O3 -mcpu=thead-c906 -o cam2h264 cam2h264.c -lm
        gcc -O2 -o h264-rtsp h264-rtsp.c
@@ -56,6 +60,7 @@ branch `wave420l`. The kernel debs are in `output/debs/`, built on
    - `loaded monet.bin, 147184 bytes`
    - `WAVE... product 0x4201, firmware ..., hardware revision ...`
    - `SET_PARAM: N frame buffers, M source buffers`
+   - `instance 0: 960x540, 2 frame buffers, SRAM 19200 bytes`
    - `frame N: ... bytes (pic ..., rd ..., wr ...), type ..., nut ...`
 
    cam2h264 prints the frame sizes and the summary line.
@@ -90,7 +95,11 @@ branch `wave420l`. The kernel debs are in `output/debs/`, built on
   (SET_FRAMEBUF): a parameter or a buffer layout is wrong. Report the
   reason.
 - `ENC_PIC: no answer; stop the stream`: the picture does not finish.
-  Report `dmesg` with the log on.
+  Report `dmesg` with the log on, with the `hang:` line. Then try without
+  the SRAM:
+
+      echo N > /sys/module/wave420l/parameters/sram
+      ./cam2h264 -i cap.raw -n 60 -x -o file.h265
 - `command 0x8: done without IRQ`: the interrupt number is wrong, but the
   encoder works.
 - The stream decodes as 960x536, or the bottom edge is wrong: the unit of
@@ -98,15 +107,15 @@ branch `wave420l`. The kernel debs are in `output/debs/`, built on
 
 ## Not known yet
 
-- Everything after the probe is untested.
+- The encoding of a picture is untested.
 - The unit of the conformance window: the driver gives 4 pixels, like the
   vendor driver.
 - Whether the firmware makes each forced IDR picture, and puts VPS, SPS
   and PPS before it.
 - The byte count: the driver uses `WR_PTR - RD_PTR`, else
   `RET_ENC_PIC_BYTE`. The log shows both.
-- H.264 and H.265 at the same time: untested. The cores share the SRAM
-  switch.
+- H.264 and H.265 at the same time: not supported. Both cores use the
+  SRAM, and each driver takes the SRAM before each picture.
 
 ## Report back
 
@@ -115,4 +124,18 @@ output. Put `file.h265` and `out.h265` in `~/Downloads`.
 
 ## Results
 
-None yet.
+### 2026-10-16, kernel P78cc (no SRAM)
+
+- Probe, firmware load and boot work: `WAVE product 0x4201, firmware
+  250505, hardware revision 0`.
+- SET_PARAM works, with an interrupt: 2 frame buffers, 1 source buffer.
+- SET_FRAMEBUF works.
+- ENC_PIC hangs: `command 0x8: timeout`. All frames are 0 bytes.
+- The register writes match the vendor driver, except the SRAM. The
+  vendor always puts the H.265 line buffers in the SRAM
+  (`secondary_axi = 0x7` in `cviVEncOpen`).
+- The `j1-rtsp.sh` on the board was an old copy: the server started as
+  H.264.
+
+Next kernel (Pc2fe): the line buffers go to the SRAM, like in the vendor
+driver. A hang prints the VPU state on a `hang:` line.
