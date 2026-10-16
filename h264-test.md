@@ -145,4 +145,8 @@ probes and registers `coda-jpeg-encoder` (`no iram` is expected).
 - mjpeg-http first dropped every frame: coda pads its header with one 0x00
   byte before SOS. The parser now skips it, as libjpeg does.
 
-H.264: not tested yet.
+**H.264, 2026-10-16.** The firmware boots (`coda980.bin` from
+`/lib/firmware`): code revision 251448, hardware product code 0x9800,
+firmware word 0xcc283001, so firmware product 0xcc28, version 3.0.1. The
+driver can use 0xcc28 as the `CODA_980` product code and check it like the
+other CODA types.
