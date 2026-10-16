@@ -1,6 +1,7 @@
-# H.264 test: the SG2000 CODA980 with the mainline coda driver
+# H.264 and JPEG test: the SG2000 codecs with the mainline coda driver
 
-Goal: encode the J1 camera to H.264 with the SoC's encoder.
+Goal: encode the J1 camera to H.264 and to motion JPEG with the SoC's
+encoders.
 
 The SG2000 H.264 encoder is a Chips&Media CODA980. Mainline's `coda` driver
 supports the CODA960, which has the same command interface. Patch 0920 adds
@@ -8,15 +9,22 @@ the CODA980 as a CODA960 variant: H.264 encoder only, constant QP, no SRAM.
 The register sequence follows the vendor driver
 (`duo-buildroot-sdk-v2/osdrv/interdrv/cvi_vc_drv/vcodec/vpuapi/coda9`).
 
-The camera gives raw Bayer, and the encoder needs YUV. The SG2000 ISP has no
+The SG2000 also has a standalone Chips&Media JPEG unit (JPU). It has the
+registers of the CODA960 JPEG engine, at offset 0, and no firmware. Patch
+0923 adds it to the same driver as a JPEG encoder. The only real change:
+the JPU takes the frame addresses in its own registers, where the CODA960
+uses its GDI. Patch 0924 adds it to the same overlay.
+
+The camera gives raw Bayer, and the encoders need YUV. The SG2000 ISP has no
 mainline driver, so `tools/cam2h264` converts on the CPU, at half size
 (960x540).
 
 ## Build
 
-Build fork, local branch `duos-coda980`: `duos-camera-j1` plus one commit.
-The commit adds 0920 (driver), 0921/0922 (overlay, riscv/arm64), and
-`CONFIG_VIDEO_CODA=m`. Build the riscv64 edge kernel as for the camera.
+Build fork, local branch `duos-coda980`: `duos-camera-j1` plus two commits.
+They add 0920 (H.264 driver), 0921/0922 (overlay, riscv/arm64), 0923 (JPEG
+driver), 0924 (JPEG node in the overlay), and `CONFIG_VIDEO_CODA=m`. Build
+the riscv64 edge kernel as for the camera.
 
 The driver source is `~/Software/armbian/linux-gc2083`, branch `coda980`, on
 v7.2-rc7. The coda files are the same in 7.2.11 and 7.3-rc6, so one 0920
@@ -49,6 +57,10 @@ serves both patch directories.
    - `Hardware product code 0x9800, firmware 0x...`
    - `Initialized CODA980, firmware product 0x...., version ...`
    - `coda-video-encoder registered as /dev/videoN`
+   - `coda-jpeg-encoder registered as /dev/videoM`, from `b000000.jpeg`
+
+   The JPEG encoder does not need the H.264 firmware. If only the JPEG
+   line is there, continue with step 4.
 
 2. Encode a raw capture, without the camera:
 
@@ -63,6 +75,14 @@ serves both patch directories.
 
    Expected: `out.h264`, 10 s of video. Note the frame rate and the times
    per frame in the summary.
+
+4. JPEG from a raw capture, then motion JPEG from the camera:
+
+       ./cam2h264 -i cap.raw -n 1 -j -o a.jpg
+       GAIN=256 ./j1-h264.sh 300 -j
+
+   Expected: `a.jpg` opens in an image viewer, and `out.mjpeg` plays with
+   `ffplay -f mjpeg out.mjpeg`.
 
 ## If a step fails
 
@@ -86,10 +106,13 @@ serves both patch directories.
   VPU address 0, 0xE400 bytes. The driver gives it to the H.264 core but
   does not use it yet.
 - The frame endian bit (0x10). The vendor sets it; the driver does the same.
+- JPEG: whether the JPU INIT command is a sufficient reset after each frame.
+  The CODA960 resets the whole codec there.
 
 ## Report back
 
-The output of each step. For step 2 and step 3, the `.h264` files.
+The output of each step. For steps 2 to 4, the `.h264`, `.jpg` and
+`.mjpeg` files.
 
 ## Results
 

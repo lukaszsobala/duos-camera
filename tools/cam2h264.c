@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * cam2h264: GC2083 raw frames -> half-size NV12 -> CODA980 H.264.
+ * cam2h264: GC2083 raw frames -> half-size NV12 -> CODA980 H.264, or
+ * -> JPU motion JPEG with -j.
  *
  *   cam2h264 -c /dev/videoN [options]   from the camera (cv1800-vi-raw)
  *   cam2h264 -i cap.raw [options]       from a file of raw frames
  *
  * Options:
- *   -e DEV   encoder (default: the device named coda-video-encoder)
- *   -o FILE  output H.264 Annex B stream (default out.h264)
+ *   -e DEV   encoder (default: the device named coda-video-encoder, or
+ *            coda-jpeg-encoder with -j)
+ *   -o FILE  output H.264 Annex B stream, or concatenated JPEG frames with
+ *            -j (default out.h264, out.mjpeg)
  *   -n N     frames to encode, 0 = until Ctrl-C (default 300)
  *   -q QP    constant QP, 0-51 (default 30)
  *   -g N     GOP size (default 30)
+ *   -j       motion JPEG with the JPEG unit, instead of H.264
+ *   -Q N     JPEG quality, 5-100 (default 85)
  *   -s F     colour saturation (default 1.5)
  *   -y FILE  write NV12 frames to FILE, without the encoder
  *
@@ -84,8 +89,8 @@ static double now_ms(void)
 	return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
 }
 
-/* Find the video device that the coda driver registered for the encoder */
-static int find_encoder(char *path, size_t len)
+/* Find the video device that the coda driver registered as name */
+static int find_encoder(const char *want, char *path, size_t len)
 {
 	DIR *d = opendir("/sys/class/video4linux");
 	struct dirent *e;
@@ -105,7 +110,7 @@ static int find_encoder(char *path, size_t len)
 		if (!f)
 			continue;
 		if (fgets(name, sizeof(name), f) &&
-		    !strncmp(name, "coda-video-encoder", 18)) {
+		    !strncmp(name, want, strlen(want))) {
 			snprintf(path, len, "/dev/%s", e->d_name);
 			found = 1;
 		}
@@ -305,7 +310,8 @@ int main(int argc, char **argv)
 	const char *cam_dev = NULL, *in_file = NULL, *out_file = "out.h264";
 	const char *yuv_file = NULL;
 	char enc_dev[300] = "";
-	int frames = 300, qp = 30, gop = 30, sat = 384;
+	int frames = 300, qp = 30, gop = 30, sat = 384, jpeg = 0, quality = 85;
+	const char *enc_name;
 	struct buf cam[NBUF_CAM], eout[NBUF_ENC_OUT], ecap[NBUF_ENC_CAP];
 	int stride = (RAW_W * 3 / 2 + 15) / 16 * 16;
 	int cfd = -1, efd, ifd = -1, ofd, opt, n, free_out = NBUF_ENC_OUT;
@@ -315,7 +321,7 @@ int main(int argc, char **argv)
 	long long bytes = 0;
 	off_t in_frames = 0;
 
-	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:")) != -1) {
+	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jQ:")) != -1) {
 		switch (opt) {
 		case 'c': cam_dev = optarg; break;
 		case 'i': in_file = optarg; break;
@@ -326,10 +332,13 @@ int main(int argc, char **argv)
 		case 'g': gop = atoi(optarg); break;
 		case 's': sat = (int)(atof(optarg) * 256); break;
 		case 'y': yuv_file = optarg; break;
+		case 'j': jpeg = 1; break;
+		case 'Q': quality = atoi(optarg); break;
 		default:
 			fprintf(stderr, "usage: %s -c /dev/videoN | -i cap.raw "
 				"[-e enc] [-o out.h264] [-n frames] [-q qp] "
-				"[-g gop] [-s saturation] [-y out.nv12]\n",
+				"[-g gop] [-s saturation] [-y out.nv12] "
+				"[-j] [-Q quality]\n",
 				argv[0]);
 			return 1;
 		}
@@ -338,9 +347,12 @@ int main(int argc, char **argv)
 		fprintf(stderr, "give -c or -i\n");
 		return 1;
 	}
+	enc_name = jpeg ? "coda-jpeg-encoder" : "coda-video-encoder";
+	if (jpeg && !strcmp(out_file, "out.h264"))
+		out_file = "out.mjpeg";
 	if (!yuv_file && !enc_dev[0] &&
-	    !find_encoder(enc_dev, sizeof(enc_dev))) {
-		fprintf(stderr, "no coda-video-encoder device; is coda loaded?\n");
+	    !find_encoder(enc_name, enc_dev, sizeof(enc_dev))) {
+		fprintf(stderr, "no %s device; is coda loaded?\n", enc_name);
 		return 1;
 	}
 
@@ -399,22 +411,28 @@ int main(int argc, char **argv)
 		f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		f.fmt.pix.width = OUT_W;
 		f.fmt.pix.height = OUT_H;
-		f.fmt.pix.pixelformat = V4L2_PIX_FMT_H264;
+		f.fmt.pix.pixelformat = jpeg ? V4L2_PIX_FMT_JPEG :
+					       V4L2_PIX_FMT_H264;
 		xioctl(efd, VIDIOC_S_FMT, &f, "encoder CAPTURE VIDIOC_S_FMT");
 
+		/* The JPEG encoder has no frame rate */
 		p.parm.output.timeperframe.numerator = 1;
 		p.parm.output.timeperframe.denominator = 30;
-		if (ioctl(efd, VIDIOC_S_PARM, &p) < 0)
+		if (!jpeg && ioctl(efd, VIDIOC_S_PARM, &p) < 0)
 			perror("warning: VIDIOC_S_PARM");
 	}
-	if (efd >= 0) {
+	if (efd >= 0 && jpeg)
+		set_ctrl(efd, V4L2_CID_JPEG_COMPRESSION_QUALITY, quality,
+			 "JPEG quality");
+	if (efd >= 0 && !jpeg) {
 		set_ctrl(efd, V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP, qp,
 			 "I frame QP");
 		set_ctrl(efd, V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP, qp,
 			 "P frame QP");
 		set_ctrl(efd, V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop, "GOP size");
 		set_ctrl(efd, V4L2_CID_MPEG_VIDEO_BITRATE, 0, "bitrate");
-
+	}
+	if (efd >= 0) {
 		map_bufs(efd, V4L2_BUF_TYPE_VIDEO_OUTPUT, eout, NBUF_ENC_OUT);
 		map_bufs(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, ecap, NBUF_ENC_CAP);
 		for (n = 0; n < NBUF_ENC_CAP; n++)
@@ -437,10 +455,13 @@ int main(int argc, char **argv)
 		die(out_file);
 	signal(SIGINT, on_sigint);
 	build_luts();
-	fprintf(stderr, "%s -> %dx%d NV12 -> %s -> %s, QP %d, GOP %d\n",
+	fprintf(stderr, "%s -> %dx%d NV12 -> %s -> %s, ",
 		cam_dev ? cam_dev : in_file, OUT_W, OUT_H,
-		yuv_file ? "no encoder" : enc_dev, out_file,
-		qp, gop);
+		yuv_file ? "no encoder" : enc_dev, out_file);
+	if (jpeg)
+		fprintf(stderr, "JPEG quality %d\n", quality);
+	else
+		fprintf(stderr, "QP %d, GOP %d\n", qp, gop);
 
 	t_start = now_ms();
 	for (n = 0; !stop && (frames == 0 || n < frames); n++) {
