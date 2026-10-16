@@ -21,7 +21,8 @@ mainline driver, so `tools/cam2h264` converts on the CPU, at half size
 
 ## Build
 
-Build fork, local branch `duos-coda980`: `duos-camera-j1` plus two commits.
+Build fork, local branch `duos-coda980`: PR #10936 (leafpmpmp `duos-camera`,
+at 9e284db7) plus two commits.
 They add 0920 (H.264 driver), 0921/0922 (overlay, riscv/arm64), 0923 (JPEG
 driver), 0924 (JPEG node in the overlay), and `CONFIG_VIDEO_CODA=m`. Build
 the riscv64 edge kernel as for the camera.
