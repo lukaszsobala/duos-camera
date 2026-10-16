@@ -2,11 +2,11 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Lukasz Sobala <lsobala1@gmail.com>
 Date: Fri, 16 Oct 2026 18:50:41 +0200
 Subject: [PATCH] media: coda: give the SG2000 SRAM to the H.264 core per
- picture
+ command
 
 The SG2000 H.264 and H.265 cores share one SRAM, and a control register
 gives it to one of them. The H.265 driver takes it for each picture.
-Give it back to the H.264 core before each H.264 picture, not only at
+Give it back to the H.264 core before each H.264 command, not only at
 boot.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -16,18 +16,18 @@ Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
  1 file changed, 5 insertions(+)
 
 diff --git a/drivers/media/platform/chips-media/coda/coda-bit.c b/drivers/media/platform/chips-media/coda/coda-bit.c
-index 94fba2d..f50d567 100644
+index 94fba2d..90d138d 100644
 --- a/drivers/media/platform/chips-media/coda/coda-bit.c
 +++ b/drivers/media/platform/chips-media/coda/coda-bit.c
-@@ -1649,6 +1649,11 @@ static int coda_prepare_encode(struct coda_ctx *ctx)
- 	u32 reg;
- 	int ret;
+@@ -85,6 +85,11 @@ static void coda_command_async(struct coda_ctx *ctx, int cmd)
+ 		coda_write(dev, 0, CODA9_GDI_WPROT_RGN_EN);
+ 	}
  
 +	/* The SG2000 H.265 encoder may have taken the shared SRAM */
 +	if (dev->ctrl_base)
 +		writel(SG2000_VC_SRAM_TO_H264,
 +		       dev->ctrl_base + SG2000_VC_SRAM_SHARE);
 +
- 	ret = coda_enc_param_change(ctx);
- 	if (ret < 0) {
- 		v4l2_warn(&ctx->dev->v4l2_dev, "parameter change failed: %d\n",
+ 	coda_write(dev, CODA_REG_BIT_BUSY_FLAG, CODA_REG_BIT_BUSY);
+ 
+ 	coda_write(dev, ctx->idx, CODA_REG_BIT_RUN_INDEX);

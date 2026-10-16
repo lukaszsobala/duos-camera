@@ -22,8 +22,8 @@ Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
  drivers/media/platform/chips-media/Makefile   |    1 +
  .../media/platform/chips-media/wave4/Kconfig  |   14 +
  .../media/platform/chips-media/wave4/Makefile |    2 +
- .../platform/chips-media/wave4/wave420l.c     | 1589 +++++++++++++++++
- 5 files changed, 1607 insertions(+)
+ .../platform/chips-media/wave4/wave420l.c     | 1594 +++++++++++++++++
+ 5 files changed, 1612 insertions(+)
  create mode 100644 drivers/media/platform/chips-media/wave4/Kconfig
  create mode 100644 drivers/media/platform/chips-media/wave4/Makefile
  create mode 100644 drivers/media/platform/chips-media/wave4/wave420l.c
@@ -78,10 +78,10 @@ index 0000000..a12b291
 +obj-$(CONFIG_VIDEO_WAVE420L) += wave420l.o
 diff --git a/drivers/media/platform/chips-media/wave4/wave420l.c b/drivers/media/platform/chips-media/wave4/wave420l.c
 new file mode 100644
-index 0000000..5cbc46f
+index 0000000..b747c21
 --- /dev/null
 +++ b/drivers/media/platform/chips-media/wave4/wave420l.c
-@@ -0,0 +1,1589 @@
+@@ -0,0 +1,1594 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Chips&Media WAVE420L HEVC encoder, as in the Sophgo SG2000
@@ -392,6 +392,11 @@ index 0000000..5cbc46f
 +module_param_named(sram, w4_sram, bool, 0644);
 +MODULE_PARM_DESC(sram, "Put the line buffers in the codec SRAM (default: on)");
 +
++static int w4_sram_share = SG2000_VC_SRAM_TO_H265;
++module_param_named(sram_share, w4_sram_share, int, 0644);
++MODULE_PARM_DESC(sram_share,
++		 "Value for the SRAM switch before each command (default: 2, H.265; -1: do not write)");
++
 +#define w4_dbg(w4, fmt, ...)						\
 +	do {								\
 +		if (w4_debug)						\
@@ -441,8 +446,8 @@ index 0000000..5cbc46f
 +/* The H.264 and H.265 cores share one SRAM: give it to the H.265 core */
 +static void w4_claim_sram(struct w4_dev *dev)
 +{
-+	if (dev->ctrl)
-+		writel(SG2000_VC_SRAM_TO_H265, dev->ctrl + SG2000_VC_SRAM_SHARE);
++	if (dev->ctrl && w4_sram_share >= 0)
++		writel(w4_sram_share, dev->ctrl + SG2000_VC_SRAM_SHARE);
 +}
 +
 +/* inst < 0: a command for the VPU, not for an instance */

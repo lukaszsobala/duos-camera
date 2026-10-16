@@ -18,7 +18,7 @@ cores share the SRAM. Patch 0927 adds the H.265 node to
 Build fork, local branch `duos-coda980`, commit "sophgo-sg200x: add the
 WAVE420L H.265 encoder". Driver source: `~/Software/armbian/linux-gc2083`,
 branch `wave420l`. The kernel debs are in `output/debs/`, built on
-2026-10-16 23:32, hash part `P1edb` (`linux-image-edge-sophgo-sg200x-riscv64_*`
+2026-10-16 23:46, hash part `P49af` (`linux-image-edge-sophgo-sg200x-riscv64_*`
 and `linux-dtb-edge-sophgo-sg200x-riscv64_*`), version 7.2.11.
 
 ## Board setup
@@ -163,6 +163,15 @@ driver. A hang prints the VPU state on a `hang:` line.
   differs: it clears `VINT_REASON_USR` after each interrupt, uses a custom
   GOP, and asks for VPS/SPS/PPS explicitly.
 
-Next kernel: the command sequence of the Amlogic driver, and the vendor
-bus drain before each reset. A hang now resets the VPU, so H.264 must
-work after it without a reboot.
+### 2026-10-16, kernel P1edb (Amlogic sequence)
+
+- ENC_PIC still hangs. At the hang the bus status is 0 and the interrupt
+  reasons are clear: the VPU waits on no bus transaction.
+- H.264 after the hang: `VIDIOC_QBUF: Connection timed out`. Likely cause:
+  coda gave the SRAM back only before each picture, and its SEQ_INIT ran
+  while the SRAM switch still pointed to the H.265 core.
+
+Next kernel (P49af): coda takes the SRAM before each command. The
+`sram_share` parameter of wave420l sets the switch value;
+`tools/w4-sram-sweep.sh` tries 2, 0, 1, 3 and -1 (no write), each with and
+without the line buffers in the SRAM.

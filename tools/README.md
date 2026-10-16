@@ -157,4 +157,6 @@ skips to the next IDR picture. No authentication.
   `/dev/mem`. From the stage 1 work.
 - `w4-gdi-dump.sh` (board): dumps the memory interface (GDI) registers of the
   H.265 encoder after a hang. Needs `devmem`.
+- `w4-sram-sweep.sh` (board): tries the H.265 encoder with each SRAM switch
+  value.
 - `stage1-sweep.sh`: for the retired `duos-csi` receiver only.
