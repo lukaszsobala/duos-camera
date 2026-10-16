@@ -21,8 +21,8 @@ Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
  drivers/media/platform/chips-media/Makefile   |    1 +
  .../media/platform/chips-media/wave4/Kconfig  |   14 +
  .../media/platform/chips-media/wave4/Makefile |    2 +
- .../platform/chips-media/wave4/wave420l.c     | 1433 +++++++++++++++++
- 5 files changed, 1451 insertions(+)
+ .../platform/chips-media/wave4/wave420l.c     | 1439 +++++++++++++++++
+ 5 files changed, 1457 insertions(+)
  create mode 100644 drivers/media/platform/chips-media/wave4/Kconfig
  create mode 100644 drivers/media/platform/chips-media/wave4/Makefile
  create mode 100644 drivers/media/platform/chips-media/wave4/wave420l.c
@@ -77,10 +77,10 @@ index 0000000..a12b291
 +obj-$(CONFIG_VIDEO_WAVE420L) += wave420l.o
 diff --git a/drivers/media/platform/chips-media/wave4/wave420l.c b/drivers/media/platform/chips-media/wave4/wave420l.c
 new file mode 100644
-index 0000000..5ca7094
+index 0000000..b4d7fa1
 --- /dev/null
 +++ b/drivers/media/platform/chips-media/wave4/wave420l.c
-@@ -0,0 +1,1433 @@
+@@ -0,0 +1,1439 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Chips&Media WAVE420L HEVC encoder, as in the Sophgo SG2000
@@ -527,6 +527,11 @@ index 0000000..5ca7094
 +	memcpy(dev->common.vaddr, fw->data, fw->size);
 +	dev_info(dev->dev, "loaded %s, %zu bytes\n", w4_fw_names[i], fw->size);
 +	release_firmware(fw);
++	/* The remap window is one 256 KiB page */
++	if (dev->common.dma & (W4_CODE_BUF_SIZE - 1))
++		dev_warn(dev->dev, "code buffer at %pad: not 256 KiB aligned\n",
++			 &dev->common.dma);
++	w4_dbg(dev, "code at %pad, temp at code + 256 KiB\n", &dev->common.dma);
 +
 +	w4_claim_sram(dev);
 +
@@ -1372,6 +1377,7 @@ index 0000000..5ca7094
 +	mutex_lock(&dev->lock);
 +	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 +	mutex_unlock(&dev->lock);
++	flush_work(&ctx->run_work);
 +	w4_stop_seq(ctx);
 +	v4l2_ctrl_handler_free(&ctx->hdl);
 +	v4l2_fh_del(&ctx->fh, file);
