@@ -56,8 +56,8 @@ frame interrupts, compare `grep -e csi -e video-input /proc/interrupts` twice.
 `cam2h264` converts each raw frame to 960x540 NV12 on the CPU and encodes
 it with the SG2000's CODA980 (H.264), with `-x` its WAVE420L (H.265), or
 with `-j` its JPEG unit (motion JPEG). See [../h264-test.md](../h264-test.md)
-and [../h265-test.md](../h265-test.md) for the kernel, overlay and
-firmware.
+for the kernel, overlay and firmware. H.265 is parked: the driver is not in
+the kernel. See [../h265/README.md](../h265/README.md).
 
 Build it on the board:
 
@@ -155,8 +155,4 @@ skips to the next IDR picture. No authentication.
   `i2c-tools`.
 - `phy-dump.sh` and `devmem.c` (board): dump the receiver registers through
   `/dev/mem`. From the stage 1 work.
-- `w4-gdi-dump.sh` (board): dumps the memory interface (GDI) registers of the
-  H.265 encoder after a hang. Needs `devmem`.
-- `w4-sram-sweep.sh` (board): tries the H.265 encoder with each SRAM switch
-  value.
 - `stage1-sweep.sh`: for the retired `duos-csi` receiver only.

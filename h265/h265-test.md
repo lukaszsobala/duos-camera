@@ -6,20 +6,26 @@ The SG2000 H.265 encoder is a Chips&Media WAVE420L. Mainline has no driver
 for it. Mainline `wave5` drives the WAVE5 family, which has other commands.
 Patch 0926 adds a new driver, `wave420l`: NV12 in, HEVC Main out, constant
 QP, an IDR picture every GOP, line buffers in the codec SRAM. The register
-sequence follows the vendor driver (`duo-buildroot-sdk-v2/osdrv/interdrv/cvi_vc_drv/vcodec/vpuapi/wave`).
+sequence follows the vendor driver
+(`duo-buildroot-sdk-v2/osdrv/interdrv/cvi_vc_drv/vcodec/vpuapi/wave`) and the
+Amlogic SM1 WAVE420L driver (`venc-hevc/w4enc.c` in
+github.com/ray38080289/meson-sm1-codecs).
 
 Patch 0925 makes coda give the shared SRAM back to the H.264 core before
-each H.264 picture. Do not run H.264 and H.265 at the same time: the
+each H.264 command. Do not run H.264 and H.265 at the same time: the
 cores share the SRAM. Patch 0927 adds the H.265 node to
 `overlays=video-codec`.
 
+Status: parked on 2026-10-17. See [README.md](README.md).
+
 ## Build
 
-Build fork, local branch `duos-coda980`, commit "sophgo-sg200x: add the
-WAVE420L H.265 encoder". Driver source: `~/Software/armbian/linux-gc2083`,
-branch `wave420l`. The kernel debs are in `output/debs/`, built on
-2026-10-17 00:08, hash part `P7372` (`linux-image-edge-sophgo-sg200x-riscv64_*`
-and `linux-dtb-edge-sophgo-sg200x-riscv64_*`), version 7.2.11.
+Apply [armbian-build-h265.patch](armbian-build-h265.patch) to the build
+fork, on top of the codec branch `duos-coda980`, with `git am`. The build
+fork also keeps it as the local branch `duos-h265-parked`. Driver source:
+`~/Software/armbian/linux-gc2083`, branch `wave420l`. Build the kernel and
+install the image and dtb packages. The last tested kernel: 2026-10-17
+00:08, hash part `P7372`, version 7.2.11.
 
 ## Board setup
 
@@ -173,7 +179,7 @@ driver. A hang prints the VPU state on a `hang:` line.
 
 Next kernel (P49af): coda takes the SRAM before each command. The
 `sram_share` parameter of wave420l sets the switch value;
-`tools/w4-sram-sweep.sh` tries 2, 0, 1, 3 and -1 (no write), each with and
+`h265/tools/w4-sram-sweep.sh` tries 2, 0, 1, 3 and -1 (no write), each with and
 without the line buffers in the SRAM.
 
 ### 2026-10-16/17, kernel P49af

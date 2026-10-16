@@ -17,9 +17,9 @@ under Armbian.
   driver: patches 0920-0924. Both work on hardware: H.264 at 29.6 fps from
   the camera, live over RTSP and MJPEG over HTTP. See
   [h264-test.md](h264-test.md).
-- **H.265 encoder, not tested yet.** Patches 0925-0927 add a new driver
-  for the WAVE420L, `wave420l`. See [h265-test.md](h265-test.md). These
-  patches are not for PR #10936.
+- **H.265 encoder: parked.** Our `wave420l` driver boots the WAVE420L,
+  but the encoder hardware never finishes a picture. The patches, the
+  results and the resume steps are in [h265/](h265/README.md).
 - **Upstream.** RFC v1 of the driver went to linux-media. The next posting
   is v2, see [patches/upstream-rfc-v1/NOTES.md](patches/upstream-rfc-v1/NOTES.md).
 
@@ -30,7 +30,7 @@ under Armbian.
 | Test the camera on a new kernel        | [j1-test.md](j1-test.md)               |
 | Take a picture, convert it to PNG      | [tools/README.md](tools/README.md)     |
 | Encode H.264 or MJPEG, live view (HTTP) | [h264-test.md](h264-test.md), [tools/README.md](tools/README.md) |
-| Test the H.265 encoder                 | [h265-test.md](h265-test.md)           |
+| H.265 encoder (parked)                 | [h265/README.md](h265/README.md)       |
 | What the driver does and assumes       | "What the driver supports" below       |
 
 ## Files
@@ -45,6 +45,7 @@ Current:
 - `tools/`: capture, conversion, encoding and live view. See
   [tools/README.md](tools/README.md).
 - `j1-test.md`, `h264-test.md`: runbooks and results.
+- `h265/`: the parked H.265 work: patches, runbook, results, tools.
 - `Makefile`: builds `gc2083.ko` out of tree.
 
 History, kept as a record. Do not use these on a current kernel:
