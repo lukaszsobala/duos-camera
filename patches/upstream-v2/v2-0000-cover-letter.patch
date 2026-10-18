@@ -1,0 +1,90 @@
+From 1f7b5374c1f69e3ad5915f41381d674b24831826 Mon Sep 17 00:00:00 2001
+From: Lukasz Sobala <lsobala1@gmail.com>
+Date: Sun, 18 Oct 2026 18:01:52 +0200
+Subject: [PATCH v2 0/2] media: i2c: GalaxyCore GC2083 sensor driver
+
+This adds a driver and a binding for the GalaxyCore GC2083, a 1920x1080
+10-bit Bayer sensor with a two-lane CSI-2 output. It is the sensor on
+Milk-V's CAM-GC2083 module, the camera sold for the Duo and Duo S.
+
+v1 was an RFC because no frame had ever come out of the driver. That has
+changed: the driver now gives correct images, so this posting drops the
+RFC tag. The problem in v1 was on the receiver side. My own SG2000
+receiver driver had the lane mapping wrong. It is not used any more.
+
+Tested on a Milk-V Duo S (Sophgo SG2000), riscv64, with the CAM-GC2083 on
+the J1 connector. The SG2000 CSI-2 receiver and raw capture drivers
+(cv1800-csi2, cv1800-vi) are not in mainline. They come from
+sg200x-camera-dkms, which the Armbian kernel for the Duo S builds in.
+Results:
+
+ - 1920x1080 RAW10 frames at 29.7fps from the 23.76MHz MCLK that the
+   board provides, which is 30fps scaled by 23.76/24.
+ - The image is correct. A lit indoor scene comes out sharp with the
+   right colours, which confirms the Bayer order SRGGB10.
+ - Exposure and analogue gain work. libcamera's simple pipeline handler
+   with the software ISP runs its auto exposure on these controls.
+ - Changing a flip while streaming returns -EBUSY and succeeds after the
+   stream stops.
+ - From v1, still true: the chip ID read, runtime PM with real power-off,
+   and no clock reference leaked over repeated load/unload and
+   bind/unbind cycles.
+
+Open questions, where I would like review:
+
+ - Whether the flips change the image. The flip registers are
+   write-only, and no frame has been checked with a flip set yet. The
+   V4L2 side (the media bus code follows the flips) works.
+ - Which parts of the vendor's init sequence matter. There is no public
+   datasheet. The register table comes from GalaxyCore's reference
+   settings in Sophgo's duo-buildroot-sdk-v2, and most of it is
+   undocumented. Ingenic's GPL-2.0+ gc2083.c carries the same table for a
+   27MHz MCLK and documents the PLL rates.
+ - There is no test pattern control. The init table writes 0x008c and
+   0x008d, which are test pattern registers on a related GalaxyCore part,
+   but I could not confirm their meaning on this one.
+
+There is still no DTS patch. The sensor node needs a receiver at the far
+end of its graph, and the SG2000 has no mainline CSI-2 receiver yet.
+
+Changes in v2:
+ - Fix the link frequency. The PLL runs at 50 times MCLK, so the lanes
+   run at 500Mbit/s (250MHz) from 24MHz, not at 185.625MHz. HTS is 2962,
+   not 2200. Pixel rate and frame rate are now right.
+ - Accept a 23.76MHz MCLK as well as 24MHz, and select the link frequency
+   from the MCLK rate. v1 warned and reported timings 1% off. Probe now
+   fails if the rate is neither, or if link-frequencies does not list the
+   matching frequency.
+ - Take the MIPI output enable (0x023e) out of the mode table. Stream on
+   writes it after the controls, so the first frame already has the
+   requested exposure, gain and flips. Stream off clears it first.
+ - Grab the flip controls while streaming, because they change the
+   Bayer order.
+ - Use pm_runtime_put_autosuspend(), and undo autosuspend on the probe
+   error path and in remove.
+ - Binding: reference video-interface-devices.yaml and use
+   unevaluatedProperties, name the example node camera@37, use 250MHz in
+   the example, and describe how the timings follow MCLK.
+ - Link to v1: https://lore.kernel.org/linux-media/<v1-message-id>/
+
+Based on v7.2-rc7. dt_binding_check and checkpatch --strict are clean,
+and the driver builds without warnings at W=1 for riscv.
+
+Lukasz Sobala (2):
+  dt-bindings: media: i2c: add GalaxyCore GC2083
+  media: i2c: add GalaxyCore GC2083 sensor driver
+
+ .../bindings/media/i2c/galaxycore,gc2083.yaml |  112 ++
+ MAINTAINERS                                   |    8 +
+ drivers/media/i2c/Kconfig                     |   10 +
+ drivers/media/i2c/Makefile                    |    1 +
+ drivers/media/i2c/gc2083.c                    | 1240 +++++++++++++++++
+ 5 files changed, 1371 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/media/i2c/galaxycore,gc2083.yaml
+ create mode 100644 drivers/media/i2c/gc2083.c
+
+
+base-commit: db2ddb87143519e20a95aa36c60b36107b736a58
+--
+2.53.0
+

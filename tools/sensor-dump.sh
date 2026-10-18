@@ -1,11 +1,8 @@
 #!/bin/sh
 # Read the GC2083's interesting registers over i2c.
 #
-# The companion to phy-dump.sh, and the half that matters more right now. Run it
-# on the vendor 5.10 stack with the camera streaming to get the register values
-# of a sensor that is demonstrably transmitting, then run it on ours and diff.
-# Anything that differs in the PLL or MIPI blocks is a candidate for why our
-# sensor drives LP transitions but never a coherent high-speed clock.
+# j1-diag.sh runs it during a stream. To compare against a known-good state,
+# dump the registers on the vendor 5.10 stack with the camera streaming and diff:
 #
 #	./sensor-dump.sh > /tmp/sensor-vendor.txt   # vendor stack, streaming
 #	./sensor-dump.sh > /tmp/sensor-ours.txt     # our stack, streaming

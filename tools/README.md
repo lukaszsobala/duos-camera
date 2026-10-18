@@ -68,9 +68,9 @@ Build it on the board:
 `-mcpu=thead-c906` (gcc 13 or later) adds the C906's T-Head extensions.
 With an older gcc, leave it out.
 
-Do not cross-build on an Ubuntu 26.04 PC. Its `riscv64-linux-gnu-gcc` and
+Do not cross-build on Ubuntu 25.10 or later. Its `riscv64-linux-gnu-gcc` and
 static libc target RVA23 (vector 1.0, Zba/Zbb). The SG2000's C906 is
-rv64gc: the binary stops with `Illegal instruction`.
+rv64gc.
 
 Put `cam2h264`, `j1-stream.sh` and `j1-h264.sh` in one directory on the
 board. Then:
@@ -164,6 +164,5 @@ skips to the next IDR picture. No authentication.
   the sensor registers. Use it when a capture gives no frames.
 - `sensor-dump.sh` (board): reads the GC2083 registers over I2C. Needs
   `i2c-tools`.
-- `phy-dump.sh` and `devmem.c` (board): dump the receiver registers through
-  `/dev/mem`. From the stage 1 work.
-- `stage1-sweep.sh`: for the retired `duos-csi` receiver only.
+- `devmem.c` (board): reads and writes a register through `/dev/mem`. The
+  H.265 tools use it.
