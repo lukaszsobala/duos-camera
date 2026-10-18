@@ -21,11 +21,15 @@ mainline driver, so `tools/cam2h264` converts on the CPU, at half size
 
 ## Build
 
-Build fork, local branch `duos-coda980`: PR #10936 (leafpmpmp `duos-camera`,
-at 9e284db7) plus two commits.
-They add 0920 (H.264 driver), 0921/0922 (overlay, riscv/arm64), 0923 (JPEG
-driver), 0924 (JPEG node in the overlay), and `CONFIG_VIDEO_CODA=m`. Build
-the riscv64 edge kernel as for the camera.
+Build fork, local branch `duos-coda980`: Armbian main (`b31ea13e`, with
+the camera from PR #10936) plus four commits. They add 0920 (H.264
+driver), 0921/0922 (overlay, riscv/arm64), 0923 (JPEG driver), 0924 (JPEG
+node in the overlay), and `CONFIG_VIDEO_CODA=m`. Build the riscv64 edge
+kernel as for the camera. Before 2026-10-18 the branch sat on the PR
+branch; backup `duos-coda980-pre-dkms-rebase-20261018`.
+
+The coda work stays as kernel patches, not in sg200x-camera-dkms. It changes
+the mainline `coda` driver, and it can go upstream in that form.
 
 The driver source is `~/Software/armbian/linux-gc2083`, branch `coda980`, on
 v7.2-rc7. The coda files are the same in 7.2.11, 7.3-rc6 and 7.3-rc7, so

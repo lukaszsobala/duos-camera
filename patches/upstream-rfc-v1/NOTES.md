@@ -7,8 +7,9 @@ Armbian's bare kernel cache, so its objects live in
 clone breaks. `git repack -a -d` inside `linux-gc2083` detaches it at the cost
 of a few GB.
 
-These are *not* the Armbian build patches. `../0910-*` and `../0911-*` are the
-Armbian-numbered copies and are left alone.
+These are *not* the Armbian build patches. Armbian builds the driver from
+`leafpmpmp/sg200x-camera-dkms` (since 2026-10-18). The old Armbian copies
+`0910-*` and `0911-*` are in the git history of this repository.
 
 ## Checks run
 

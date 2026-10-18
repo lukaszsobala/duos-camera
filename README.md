@@ -3,20 +3,30 @@
 Working files for the CAM-GC2083 on the J1 connector of the Milk-V Duo S,
 under Armbian.
 
-## Current state (2026-10-16)
+## Current state (2026-10-18)
 
 - **The camera works.** The GC2083 gives correct 1920x1080 frames at 29.7 fps
-  on J1. The SG2000 receiver and capture drivers come from armbian/build PR
-  #10936 (`cv1800-csi2`, `cv1800-vi`).
-- **The GC2083 patches are in PR #10936.** leafpmpmp merged our
-  `duos-camera-j1` branch on 2026-10-16: patches 0910-0913, and
-  `overlays=camera-j1-gc2083`. Since then the J1 and J2 overlays share
-  `sg2000-camera.dtsi`.
+  on J1, through the SG2000 receiver and capture drivers (`cv1800-csi2`,
+  `cv1800-vi`).
+- **The camera support is in Armbian main.** armbian/build merged PR #10936
+  on 2026-10-18 (`0931fc56`). The receiver, capture and sensor drivers and
+  the camera overlays are no longer kernel patches. They live in
+  [leafpmpmp/sg200x-camera-dkms](https://github.com/leafpmpmp/sg200x-camera-dkms),
+  under `linux/`. The Armbian extension `sophgo-sg200x-camera` copies a
+  pinned commit of that repository into the kernel tree. Both Duo S boards
+  enable the extension. The overlay is still `overlays=camera-j1-gc2083`.
+- **GC2083 changes go to sg200x-camera-dkms.** Make a commit there, then
+  move the `SG200X_CAMERA_REF` pin in `extensions/sophgo-sg200x-camera.sh`.
+  The pin `2c1ebd54` carries our `gc2083.c` and binding byte for byte. The
+  same repository also builds as a DKMS package for other kernels.
 - **Hardware encoders.** The local build branch `duos-coda980` adds the
   SG2000 H.264 encoder (CODA980) and JPEG unit to the mainline `coda`
-  driver: patches 0920-0924. Both work on hardware: H.264 at 29.6 fps from
-  the camera, live over RTSP and MJPEG over HTTP. See
-  [h264-test.md](h264-test.md).
+  driver: patches 0920-0924, on top of Armbian main. They stay kernel
+  patches, because they change a driver that mainline already has. Both
+  encoders work on hardware: H.264 at 29.6 fps from the camera, live over
+  RTSP and MJPEG over HTTP. See [h264-test.md](h264-test.md).
+- **libcamera works** with the software ISP, at about 5 fps. The startup
+  auto exposure overshoots. See [libcamera/README.md](libcamera/README.md).
 - **H.265 encoder: parked.** Our `wave420l` driver boots the WAVE420L,
   but the encoder hardware never finishes a picture. The patches, the
   results and the resume steps are in [h265/](h265/README.md).
@@ -38,10 +48,17 @@ under Armbian.
 Current:
 
 - `gc2083.c`, `galaxycore,gc2083.yaml`: the sensor driver and its binding.
-  This is the source. The driver in `patches/0911` must stay byte-identical.
-- `patches/`: the Armbian copies of 0910-0913 and 0920-0924, from the 7.2
-  patch directory. The 7.3 copy of 0911 differs only in the MAINTAINERS
-  line number. `patches/upstream-rfc-v1/`: the linux-media series.
+  This is the source. The copies in sg200x-camera-dkms
+  (`linux/drivers/media/i2c/sg200x-camera/gc2083.c` and
+  `linux/Documentation/devicetree/bindings/media/i2c/galaxycore,gc2083.yaml`)
+  must stay byte-identical.
+- `patches/`: the Armbian copies of the codec patches 0920-0924, from the
+  7.2 patch directory. The 7.3 copies differ only in the `index` line of
+  0921. `patches/upstream-rfc-v1/`: the linux-media series. The GC2083
+  patches 0910-0913 are gone: sg200x-camera-dkms holds the driver and the
+  J1 overlay now. Git history keeps the old patches.
+- `libcamera/`: the libcamera patch for `cv1800-vi` and the GC2083, and a
+  cross build.
 - `tools/`: capture, conversion, encoding and live view. See
   [tools/README.md](tools/README.md).
 - `j1-test.md`, `h264-test.md`: runbooks and results.
@@ -230,8 +247,9 @@ Or just reboot.
 
 # Test 2: the sensor driver
 
-> **History, up to "The upstream series".** PR #10936 now carries the
-> patches, the config symbols and the J1 overlay. The overlays and the
+> **History, up to "The upstream series".** Armbian now builds the driver,
+> its config symbol and the J1 overlay from sg200x-camera-dkms. The patch
+> steps below no longer apply. The overlays and the
 > 185.625 MHz link frequency below are from before the receiver existed. The
 > driver now uses 247.5 MHz (MCLK 23.76 MHz) or 250 MHz (MCLK 24 MHz), and
 > HTS 2962 instead of 2200.

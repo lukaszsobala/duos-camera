@@ -13,6 +13,12 @@ The patch adds two things to libcamera:
 - A camera sensor helper for the GC2083: black level 64 at 10 bits, and the
   analogue gain code is linear (64 = 1x).
 
+sg200x-camera-dkms has its own libcamera patch,
+`extras/libcamera/libcamera-sg200x.patch`, against v0.7.2. It adds the
+same `cv1800-vi` line and an IMX708 tuning file, but no GC2083 helper. The
+two patches conflict on the `cv1800-vi` line. Proposed next step: add the
+GC2083 helper to that patch.
+
 ## Build (on the PC)
 
 Needs Docker.
@@ -62,4 +68,20 @@ The binaries need only rv64gc (checked with `readelf -A`).
 
 ## Results
 
-None yet.
+2026-10-17, Duo S riscv64, edge 7.2 (PR #10936 kernel):
+
+- `cam -l` lists the GC2083. `ldd` shows the `/usr/local` libraries.
+- 1916x1080 BGR888 at about 5 fps. The CPU debayer takes 199 ms per frame.
+- Auto exposure overshoots at the start. About 1.7 s in, the AGC measures
+  one near-black frame (Y 0.01). It then goes to the maximum exposure and
+  gain (1117 lines, 9474) and needs over a minute to come back.
+- `tools/vi-armtest` finds no partly filled frames from `cv1800-vi`, with a
+  slow consumer or with gain changes. Open: whether a sensor start state
+  from the previous run causes the dark frame.
+- Warnings: the GC2083 driver has no `V4L2_SEL_TGT_NATIVE_SIZE`. The J1
+  overlay has no `orientation` or `rotation`. There is no GC2083 tuning
+  file.
+
+The current `cv1800-vi` (sg200x-camera-dkms `2c1ebd54`) arms the front end
+only after `skip_frames` frames. Run the test again on a kernel from Armbian
+main.

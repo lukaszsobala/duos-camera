@@ -1,7 +1,7 @@
 # J1 test: GC2083 on the cv1800-csi2 / cv1800-vi drivers
 
 Goal: get a frame from the GC2083 on J1 through the SG2000 receiver and capture
-drivers from armbian/build PR #10936. Those drivers stream on J2. This test
+drivers (`cv1800-csi2`, `cv1800-vi`). Those drivers stream on J2. This test
 replaces the `duos-csi` stage 1 work.
 
 ## What changed from stage 1
@@ -21,13 +21,21 @@ are data lanes.
 
 ## Build
 
-The PR #10936 branch (`leafpmpmp/armbian-build`, branch `duos-camera`). It
-holds the GC2083 patches since 2026-10-16. The camera patches are one block:
-theirs 0900-0909, then the GC2083 binding and driver (0910/0911) and the J1
-overlay (0912 riscv, 0913 arm64). The J1 and J2 overlays include
+Armbian main, since PR #10936 (merged 2026-10-18). The extension
+`sophgo-sg200x-camera` copies the drivers and overlays from a pinned commit
+of `leafpmpmp/sg200x-camera-dkms` into the kernel tree. The Duo S board
+files enable the extension. The J1 and J2 overlays include
 `sg2000-camera.dtsi`.
 
     ./compile.sh kernel BOARD=milkv-duos-riscv BRANCH=edge
+
+The build log shows `SG200x camera [ adding drivers and overlays to the
+kernel tree ]`. To test a GC2083 change before it is in that repository,
+set `SG200X_CAMERA_REPO` and `SG200X_CAMERA_REF` on the `compile.sh`
+command line. Point them at a fork and a `commit:<sha>`.
+
+Runs 1-5 below used the PR branch, with the GC2083 as kernel patches
+0910-0913. The driver source was the same.
 
 Install the image and dtb packages on the board. In `/boot/armbianEnv.txt`:
 
