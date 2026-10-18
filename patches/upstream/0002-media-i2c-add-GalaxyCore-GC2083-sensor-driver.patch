@@ -1,7 +1,7 @@
 From 1f7b5374c1f69e3ad5915f41381d674b24831826 Mon Sep 17 00:00:00 2001
 From: Lukasz Sobala <lsobala1@gmail.com>
 Date: Wed, 12 Aug 2026 01:45:39 +0200
-Subject: [PATCH v2 2/2] media: i2c: add GalaxyCore GC2083 sensor driver
+Subject: [PATCH 2/2] media: i2c: add GalaxyCore GC2083 sensor driver
 
 The GC2083 is a 1920x1080 10-bit Bayer sensor with a two-lane MIPI CSI-2
 output, sold by Milk-V as the CAM-GC2083 module for the Duo and Duo S.
@@ -42,17 +42,6 @@ Supported: 1920x1080 at 30fps, RAW10, two lanes.
 
 Signed-off-by: Lukasz Sobala <lsobala1@gmail.com>
 ---
-Changes in v2:
- - Link frequency 250MHz at 24MHz MCLK (PLL = 50 x MCLK), not 185.625MHz;
-   HTS 2962, not 2200
- - Accept 23.76MHz MCLK too and select the link frequency from the rate;
-   fail probe for other rates instead of warning
- - Write the MIPI output enable (0x023e) after the controls on stream on,
-   clear it first on stream off
- - Grab the flip controls while streaming
- - pm_runtime_put_autosuspend(); undo autosuspend on error and remove
- - Mention Ingenic's driver as a second source for the table and PLL
-
  MAINTAINERS                |    8 +
  drivers/media/i2c/Kconfig  |   10 +
  drivers/media/i2c/Makefile |    1 +

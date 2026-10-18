@@ -31,9 +31,8 @@ under Armbian.
 - **H.265 encoder: parked.** Our `wave420l` driver boots the WAVE420L,
   but the encoder hardware never finishes a picture. The patches, the
   results and the resume steps are in [h265/](h265/README.md).
-- **Upstream.** RFC v1 of the driver went to linux-media. v2 is ready in
-  [patches/upstream-v2/](patches/upstream-v2/NOTES.md). It drops the RFC
-  tag, because the driver now gives correct frames.
+- **Upstream.** Nothing has been posted yet. The first posting to
+  linux-media is ready in [patches/upstream/](patches/upstream/NOTES.md).
 
 ## Where to start
 
@@ -66,7 +65,7 @@ Current:
   must stay byte-identical.
 - `patches/`: the Armbian copies of the codec patches 0920-0924, from the
   7.2 patch directory. The 7.3 copies differ only in the `index` line of
-  0921. `patches/upstream-v2/`: the linux-media series. The GC2083
+  0921. `patches/upstream/`: the linux-media series. The GC2083
   patches 0910-0913 are gone: sg200x-camera-dkms holds the driver and the
   J1 overlay now. Git history keeps the old patches.
 - `libcamera/`: the libcamera patch for `cv1800-vi` and the GC2083, and a
@@ -180,10 +179,9 @@ a module needs kbuild, which the `Makefile` drives.
 
 ## Upstream
 
-`patches/upstream-v2/` holds the next linux-media posting: cover letter,
-binding, driver, and [NOTES.md](patches/upstream-v2/NOTES.md) with the
-checks and the steps before sending. RFC v1 is in the git history of this
-repository. The patches come from `<linux-gc2083>`, branch `gc2083`, which
+`patches/upstream/` holds the first linux-media posting, not sent yet:
+cover letter, binding, driver, and [NOTES.md](patches/upstream/NOTES.md)
+with the checks and the steps before sending. The patches come from `<linux-gc2083>`, branch `gc2083`, which
 is byte-identical to `gc2083.c` and the binding here.
 
 ## History
