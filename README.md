@@ -19,12 +19,13 @@ under Armbian.
   move the `SG200X_CAMERA_REF` pin in `extensions/sophgo-sg200x-camera.sh`.
   The pin `2c1ebd54` carries our `gc2083.c` and binding byte for byte. The
   same repository also builds as a DKMS package for other kernels.
-- **Hardware encoders.** The local build branch `duos-coda980` adds the
-  SG2000 H.264 encoder (CODA980) and JPEG unit to the mainline `coda`
-  driver: patches 0920-0924, on top of Armbian main. They stay kernel
-  patches, because they change a driver that mainline already has. Both
-  encoders work on hardware: H.264 at 29.6 fps from the camera, live over
-  RTSP and MJPEG over HTTP. See [h264-test.md](h264-test.md).
+- **Hardware encoders.** The build branch `duos-coda980` (fork
+  github.com/lukaszsobala/build) adds the SG2000 H.264 encoder (CODA980)
+  and JPEG unit to the mainline `coda` driver: patches 0920-0924, on top
+  of Armbian main. They stay kernel patches, because they change a driver
+  that mainline already has. Both encoders work on hardware: H.264 at
+  29.6 fps from the camera, live over RTSP and MJPEG over HTTP. See
+  [h264-test.md](h264-test.md).
 - **libcamera works** with the software ISP, at about 5 fps. The startup
   auto exposure overshoots. See [libcamera/README.md](libcamera/README.md).
 - **H.265 encoder: parked.** Our `wave420l` driver boots the WAVE420L,
@@ -44,6 +45,16 @@ under Armbian.
 | What the driver does and assumes       | "What the driver supports" below       |
 
 ## Files
+
+Paths in these files use three placeholders:
+
+- `<armbian-build>`: a checkout of the Armbian build framework,
+  github.com/armbian/build, or the fork github.com/lukaszsobala/build for
+  the codec branch.
+- `<duo-buildroot-sdk-v2>`: Milk-V's vendor SDK,
+  github.com/milkv-duo/duo-buildroot-sdk-v2.
+- `<linux-gc2083>`: the mainline kernel tree where the drivers were written.
+  It is not published. The patches in this repository are its commits.
 
 Current:
 
@@ -82,7 +93,8 @@ date. Each section says so where it matters.
 
 ## Board facts
 
-Extracted from Milk-V's own board files in `../duo-buildroot-sdk-v2`
+Extracted from Milk-V's own board files in the vendor SDK,
+`<duo-buildroot-sdk-v2>`
 (`build/boards/cv181x/sg2000_milkv_duos_glibc_arm64_sd/u-boot/cvi_board_init.c`
 and `device/generic/rootfs_overlay/duos/mnt/data/sensor_cfg_*.ini`):
 
@@ -131,11 +143,11 @@ On the host, against the kernel tree Armbian already built. For arm64 you need
 
     cd duos-mclk
     make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-         KDIR=~/Software/armbian/build/cache/sources/linux-kernel-worktree/7.2__sophgo-sg200x-arm64__arm64
+         KDIR=<armbian-build>/cache/sources/linux-kernel-worktree/7.2__sophgo-sg200x-arm64__arm64
 
     # or riscv64:
     make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- \
-         KDIR=~/Software/armbian/build/cache/sources/linux-kernel-worktree/7.2__sophgo-sg200x-riscv64__riscv64
+         KDIR=<armbian-build>/cache/sources/linux-kernel-worktree/7.2__sophgo-sg200x-riscv64__riscv64
 
 `modinfo duos-mclk.ko` should print a `vermagic:` matching `uname -r` on the
 board. The worktree is root-owned, so if make complains about permissions run it
@@ -278,7 +290,7 @@ though it does need something on the far end of the endpoint, see below.
 
 1. Copy the patches in:
 
-       cp patches/*.patch ~/Software/armbian/build/patch/kernel/archive/sophgo-sg200x-7.2/
+       cp patches/*.patch <armbian-build>/patch/kernel/archive/sophgo-sg200x-7.2/
 
 2. Add **three** config symbols:
 
@@ -528,7 +540,7 @@ redundant.
 
 `patches/upstream-rfc-v1/` holds the RFC v1 posting to linux-media: cover
 letter, binding, driver, and `NOTES.md`. The patches come from a separate
-clean tree, `~/Software/armbian/linux-gc2083`, branch `gc2083`, on mainline
+clean tree, `<linux-gc2083>`, branch `gc2083`, on mainline
 v7.2-rc7. The Armbian worktree cannot produce a postable diff.
 
 RFC v1 said that no frame had come out of the driver. That is no longer
@@ -685,7 +697,7 @@ conditions, and what to do about each way it can fail. **The design and the
 register map are in [receiver-plan.md](receiver-plan.md)**, including where every
 constant came from. Everything the plan needed from the vendor SDK is recorded
 there, so none of it has to be re-derived from
-`~/Software/armbian/duo-buildroot-sdk-v2`.
+the vendor SDK.
 
 ---
 

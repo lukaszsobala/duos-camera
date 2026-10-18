@@ -1,6 +1,6 @@
 # GC2083 upstream RFC v1
 
-Generated from `~/Software/armbian/linux-gc2083`, branch `gc2083`, based on
+Generated from `<linux-gc2083>`, branch `gc2083`, based on
 mainline **v7.2-rc7** (`db2ddb871435`). That tree is a `git clone --shared` of
 Armbian's bare kernel cache, so its objects live in
 `build/cache/git-bare/kernel` — if Armbian ever garbage-collects that repo the
@@ -55,14 +55,14 @@ sensor drivers.
 ```
 git send-email --to=linux-media@vger.kernel.org \
     --cc=... \
-    ~/Software/armbian/duos-camera/patches/upstream-rfc-v1/*.patch
+    patches/upstream-rfc-v1/*.patch
 ```
 
 Marked RFC deliberately — see the cover letter. To post as a plain v1 instead,
 regenerate without `--rfc`:
 
 ```
-cd ~/Software/armbian/linux-gc2083
+cd <linux-gc2083>
 git format-patch --cover-letter -o <dir> db2ddb871435..HEAD
 ```
 

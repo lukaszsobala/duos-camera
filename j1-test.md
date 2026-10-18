@@ -93,7 +93,7 @@ dumps the sensor registers.
 - Frames of the wrong size: the VI resets itself and continues. Check the
   `a000000.video-input/status` file for the measured size.
 
-## Report back
+## What to record
 
 The output of steps 1-4, both debugfs `status` files, and `dmesg`.
 

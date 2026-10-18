@@ -21,17 +21,16 @@ mainline driver, so `tools/cam2h264` converts on the CPU, at half size
 
 ## Build
 
-Build fork, local branch `duos-coda980`: Armbian main (`b31ea13e`, with
-the camera from PR #10936) plus four commits. They add 0920 (H.264
-driver), 0921/0922 (overlay, riscv/arm64), 0923 (JPEG driver), 0924 (JPEG
-node in the overlay), and `CONFIG_VIDEO_CODA=m`. Build the riscv64 edge
-kernel as for the camera. Before 2026-10-18 the branch sat on the PR
-branch; backup `duos-coda980-pre-dkms-rebase-20261018`.
+Branch `duos-coda980` of the build fork github.com/lukaszsobala/build:
+Armbian main (`b31ea13e`, with the camera from PR #10936) plus four
+commits. They add 0920 (H.264 driver), 0921/0922 (overlay, riscv/arm64),
+0923 (JPEG driver), 0924 (JPEG node in the overlay), and
+`CONFIG_VIDEO_CODA=m`. Build the riscv64 edge kernel as for the camera.
 
 The coda work stays as kernel patches, not in sg200x-camera-dkms. It changes
 the mainline `coda` driver, and it can go upstream in that form.
 
-The driver source is `~/Software/armbian/linux-gc2083`, branch `coda980`, on
+The driver source is `<linux-gc2083>`, branch `coda980`, on
 v7.2-rc7. The coda files are the same in 7.2.11, 7.3-rc6 and 7.3-rc7, so
 one 0920 serves both patch directories.
 
@@ -40,7 +39,7 @@ one 0920 serves both patch directories.
 1. Install the image and dtb packages.
 2. Copy the vendor firmware to the board, as `/lib/firmware/coda980.bin`:
 
-       scp ~/Software/armbian/duo-buildroot-sdk-v2/device/generic/rootfs_overlay/common/usr/share/fw_vcodec/coda980.bin root@<board>:/lib/firmware/
+       scp <duo-buildroot-sdk-v2>/device/generic/rootfs_overlay/common/usr/share/fw_vcodec/coda980.bin root@<board>:/lib/firmware/
 
    md5 `02d773cb7b1ef926c7f1e30e5b7918f8`. It has no license file.
 3. In `/boot/armbianEnv.txt`:
@@ -146,7 +145,7 @@ one 0920 serves both patch directories.
 - JPEG: answered, see Results. INIT is enough after a complete frame, but
   not after a stall.
 
-## Report back
+## What to record
 
 The output of each step. For steps 2 to 4, the `.h264`, `.jpg` and
 `.mjpeg` files. For step 5, the frame rate in the browser.

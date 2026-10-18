@@ -23,7 +23,7 @@ Status: parked on 2026-10-17. See [README.md](README.md).
 Apply [armbian-build-h265.patch](armbian-build-h265.patch) to the build
 fork, on top of the codec branch `duos-coda980`, with `git am`. The build
 fork also keeps it as the local branch `duos-h265-parked`. Driver source:
-`~/Software/armbian/linux-gc2083`, branch `wave420l`. Build the kernel and
+`<linux-gc2083>`, branch `wave420l`. Build the kernel and
 install the image and dtb packages. The last tested kernel: 2026-10-17
 00:08, hash part `P7372`, version 7.2.11.
 
@@ -32,7 +32,7 @@ install the image and dtb packages. The last tested kernel: 2026-10-17
 1. Install the image and dtb packages.
 2. Copy the vendor firmware to the board, as `/lib/firmware/monet.bin`:
 
-       scp ~/Software/armbian/duo-buildroot-sdk-v2/device/generic/rootfs_overlay/common/usr/share/fw_vcodec/monet.bin root@<board>:/lib/firmware/
+       scp <duo-buildroot-sdk-v2>/device/generic/rootfs_overlay/common/usr/share/fw_vcodec/monet.bin root@<board>:/lib/firmware/
 
    md5 `202043a809fdfa607a2d01d179aa7c3d`. It has no license file.
 
@@ -131,10 +131,10 @@ install the image and dtb packages. The last tested kernel: 2026-10-17
 - H.264 and H.265 at the same time: not supported. Both cores use the
   SRAM, and each driver takes the SRAM before each picture.
 
-## Report back
+## What to record
 
-The `dmesg` output of steps 1 and 2, with the log on, and the cam2h264
-output. Put `file.h265` and `out.h265` in `~/Downloads`.
+The `dmesg` output of steps 1 and 2, with the log on, the cam2h264
+output, and the files `file.h265` and `out.h265`.
 
 ## Results
 

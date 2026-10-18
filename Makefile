@@ -12,10 +12,10 @@
 # On the host, against the tree Armbian already built:
 #
 #   make ARCH=arm64   CROSS_COMPILE=aarch64-linux-gnu- \
-#        KDIR=~/Software/armbian/build/cache/sources/linux-kernel-worktree/7.2__sophgo-sg200x-arm64__arm64
+#        KDIR=<armbian-build>/cache/sources/linux-kernel-worktree/7.2__sophgo-sg200x-arm64__arm64
 #
 #   make ARCH=riscv   CROSS_COMPILE=riscv64-linux-gnu- \
-#        KDIR=~/Software/armbian/build/cache/sources/linux-kernel-worktree/7.2__sophgo-sg200x-riscv64__riscv64
+#        KDIR=<armbian-build>/cache/sources/linux-kernel-worktree/7.2__sophgo-sg200x-riscv64__riscv64
 #
 # Either way this only links against a kernel whose config has V4L2_CCI_I2C and
 # VIDEO_V4L2_SUBDEV_API. Kernels with the PR #10936 camera patches have both.

@@ -9,8 +9,8 @@
 The sensor side is done (see README.md). What is missing is everything that
 receives the two MIPI lanes. This file is the hardware map and the staged plan.
 
-Everything here was read out of `~/Software/armbian/duo-buildroot-sdk-v2`, the
-vendor 5.10 SDK, which is checked out locally. Paths below are relative to it.
+Everything here was read out of `<duo-buildroot-sdk-v2>`, the
+vendor 5.10 SDK. Paths below are relative to it.
 
 ## The one thing that changes the size of this job
 
