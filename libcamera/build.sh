@@ -15,7 +15,7 @@ W="$D/work"
 mkdir -p "$W"
 
 docker run --rm -v "$W:/w" -v "$D:/p:ro" -e REV="$REV" \
-	-e UID_GID="$(id -u):$(id -g)" debian:trixie sh -ec '
+	-e UID_GID="$(id -u):$(id -g)" --platform linux/amd64 debian:trixie sh -ec '
 dpkg --add-architecture riscv64
 apt-get update -q
 apt-get install -qy --no-install-recommends \
