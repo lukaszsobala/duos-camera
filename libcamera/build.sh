@@ -12,10 +12,13 @@ set -e
 D=$(cd "$(dirname "$0")" && pwd)
 REV=${1:-a92285e9c8f8d5aba24c6f72f49efc73074002e1}
 W="$D/work"
+# Debian trixie (multi-arch index), by digest: a pull by digest leaves the
+# local debian:trixie tag alone. --platform picks the amd64 image.
+IMAGE=debian:trixie@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5
 mkdir -p "$W"
 
 docker run --rm -v "$W:/w" -v "$D:/p:ro" -e REV="$REV" \
-	-e UID_GID="$(id -u):$(id -g)" --platform linux/amd64 debian:trixie sh -ec '
+	-e UID_GID="$(id -u):$(id -g)" --platform linux/amd64 "$IMAGE" sh -ec '
 dpkg --add-architecture riscv64
 apt-get update -q
 apt-get install -qy --no-install-recommends \

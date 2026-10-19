@@ -20,6 +20,9 @@ REPO=https://github.com/leafpmpmp/duo-buildroot-sdk-v2
 DIRS="flatbuffers cvibuilder cvikernel cnpy cviruntime"
 ARCHS=${*:-riscv64 arm64}
 W="$D/work"
+# Debian trixie (multi-arch index), by digest: a pull by digest leaves the
+# local debian:trixie tag alone. --platform picks the amd64 image.
+IMAGE=debian:trixie@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5
 mkdir -p "$W"
 
 # Source tree at $REV, in work/src
@@ -47,7 +50,7 @@ fi
 mkdir -p "$W/apt"
 docker run --rm -v "$W:/w" -v "$W/apt:/var/cache/apt/archives" \
 	-e REV="$REV" -e ARCHS="$ARCHS" -e UID_GID="$(id -u):$(id -g)" \
-	--platform linux/amd64 debian:trixie sh -ec '
+	--platform linux/amd64 "$IMAGE" sh -ec '
 rm -f /etc/apt/apt.conf.d/docker-clean
 for a in $ARCHS; do
 	dpkg --add-architecture $a
