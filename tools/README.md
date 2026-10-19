@@ -109,6 +109,11 @@ Play the stream on the PC:
 The conversion uses the top 8 bits of each sample, one pixel per 2x2 Bayer
 cell, gray-world white balance, and no colour matrix.
 
+Object detection on the TPU: `-d model.cvimodel` draws boxes and labels
+into the picture, also through `j1-rtsp.sh` and `j1-http.sh`. It needs a
+build with `-DWITH_TPU` and the TPU runtime. See
+[../tpu/README.md](../tpu/README.md).
+
 ## mjpeg-http: live view in a browser
 
 `mjpeg-http` reads motion JPEG on stdin and serves it over HTTP as

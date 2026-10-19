@@ -16,3 +16,6 @@ __pycache__/
 libcamera/work/
 libcamera/libcamera-riscv64.tar.gz
 /tools/vi-armtest
+tpu/work/
+tpu/cviruntime-*.tar.gz
+/tpu/det-image

@@ -3,7 +3,7 @@
 Working files for the CAM-GC2083 on the J1 connector of the Milk-V Duo S,
 under Armbian.
 
-## Current state (2026-10-18)
+## Current state (2026-10-19)
 
 - **The camera works.** The GC2083 gives correct 1920x1080 frames at 29.7 fps
   on J1, through the SG2000 receiver and capture drivers (`cv1800-csi2`,
@@ -26,6 +26,10 @@ under Armbian.
   that mainline already has. Both encoders work on hardware: H.264 at
   29.6 fps from the camera, live over RTSP and MJPEG over HTTP. See
   [h264-test.md](h264-test.md).
+- **TPU object detection: ready to test.** `cam2h264 -d` runs a YOLOv8
+  model on the TPU and draws the boxes into the H.264 or MJPEG stream. The
+  driver is in Armbian main; the runtime and the programs are in
+  [tpu/](tpu/README.md). Not run on hardware yet.
 - **libcamera works** with the software ISP, at about 5 fps. The startup
   auto exposure overshoots. See [libcamera/README.md](libcamera/README.md).
 - **H.265 encoder: parked.** Our `wave420l` driver boots the WAVE420L,
@@ -42,6 +46,7 @@ under Armbian.
 | Take a picture, convert it to PNG      | [tools/README.md](tools/README.md)     |
 | Encode H.264 or MJPEG, live view (HTTP) | [h264-test.md](h264-test.md), [tools/README.md](tools/README.md) |
 | H.265 encoder (parked)                 | [h265/README.md](h265/README.md)       |
+| Object detection on the TPU            | [tpu/README.md](tpu/README.md)         |
 | What the driver does and assumes       | "The sensor driver" below              |
 
 ## Files
@@ -74,6 +79,8 @@ Current:
   [tools/README.md](tools/README.md).
 - `j1-test.md`, `h264-test.md`: runbooks and results.
 - `h265/`: the parked H.265 work: patches, runbook, results, tools.
+- `tpu/`: object detection on the TPU: the runtime build, the detector,
+  a model inspector.
 - `Makefile`: builds `gc2083.ko` out of tree.
 
 `led/` is not camera work. It turns the blue user LED off. See

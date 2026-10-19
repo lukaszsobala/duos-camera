@@ -25,6 +25,11 @@
  *   -F HZ    mains frequency, 50 or 60: exposure times in steps of the
  *            light flicker period, against banding. 0 = off (default 50)
  *   -G X     highest analogue gain for auto exposure (default 32x)
+ *   -d FILE  object detection on the TPU with this YOLOv8 cvimodel: boxes
+ *            and labels in the picture (build with -DWITH_TPU)
+ *   -t T     detection score threshold, 0-1 (default 0.5)
+ *   -L LIST  detection class names, comma-separated (default: COCO for
+ *            80-class models)
  *
  * The input is packed RAW12, RGGB, 1920x1080, 10-bit data in the top bits.
  * Each 2x2 Bayer cell becomes one output pixel: 960x540. The program uses
@@ -36,7 +41,15 @@
  * is added only when the sensor is at its limits. With -i or -M, the
  * software gain alone sets the exposure.
  *
+ * Detection: a second thread takes the newest frame whenever the TPU is
+ * free. Each frame gets the latest boxes. With -i, each frame waits for
+ * its own boxes.
+ *
  * Build: cc -O2 -o cam2h264 cam2h264.c -lm
+ * With detection, from this directory, with the runtime in /opt/cviruntime:
+ *   cc -O2 -DWITH_TPU -I../tpu -I/opt/cviruntime/include -o cam2h264 \
+ *      cam2h264.c ../tpu/tpu-det.c -L/opt/cviruntime/lib \
+ *      -Wl,-rpath,/opt/cviruntime/lib -lcviruntime -lpthread -lm
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -52,6 +65,10 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/videodev2.h>
+#ifdef WITH_TPU
+#include <pthread.h>
+#include "tpu-det.h"
+#endif
 
 #define RAW_W	1920
 #define RAW_H	1080
@@ -500,10 +517,135 @@ static void stream(int fd, enum v4l2_buf_type type, int on)
 	       on ? "VIDIOC_STREAMON" : "VIDIOC_STREAMOFF");
 }
 
+#ifdef WITH_TPU
+#define DET_MAX	32
+
+/* The detector thread and what it shares with the frame loop */
+static struct {
+	struct det *d;
+	pthread_t thread;
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	uint8_t *nv12;		/* the frame for the detector */
+	int busy;		/* nv12 is waiting or in work */
+	int quit;
+	float thresh;
+	struct det_box box[DET_MAX];	/* the latest result */
+	int nbox;
+} tpu = {
+	.lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER,
+};
+
+static void *tpu_main(void *arg)
+{
+	struct det_box box[DET_MAX];
+	int n;
+
+	(void)arg;
+	pthread_mutex_lock(&tpu.lock);
+	for (;;) {
+		while (!tpu.busy && !tpu.quit)
+			pthread_cond_wait(&tpu.cond, &tpu.lock);
+		if (tpu.quit)
+			break;
+		pthread_mutex_unlock(&tpu.lock);
+		det_load_nv12(tpu.d, tpu.nv12);
+		n = det_run(tpu.d, tpu.thresh, 0.5f, box, DET_MAX);
+		pthread_mutex_lock(&tpu.lock);
+		if (n >= 0) {
+			memcpy(tpu.box, box, n * sizeof(box[0]));
+			tpu.nbox = n;
+		}
+		tpu.busy = 0;
+		pthread_cond_broadcast(&tpu.cond);
+	}
+	pthread_mutex_unlock(&tpu.lock);
+	return NULL;
+}
+
+static void tpu_start(const char *model, const char *names_list,
+		      float thresh, const char *const **names)
+{
+	tpu.d = det_open(model);
+	if (!tpu.d)
+		exit(1);
+	*names = det_names(tpu.d, names_list);
+	det_set_frame(tpu.d, OUT_W, OUT_H);
+	tpu.thresh = thresh;
+	tpu.nv12 = malloc(OUT_W * OUT_H * 3 / 2);
+	if (!tpu.nv12)
+		die("malloc");
+	if (pthread_create(&tpu.thread, NULL, tpu_main, NULL))
+		die("pthread_create");
+}
+
+/*
+ * Give the frame to the detector if it is free, then draw the latest
+ * boxes. wait: wait for this frame's own boxes.
+ */
+static int tpu_frame(uint8_t *nv12, int wait, const char *const *names,
+		     struct det_box *box)
+{
+	int n;
+
+	pthread_mutex_lock(&tpu.lock);
+	if (!tpu.busy) {
+		memcpy(tpu.nv12, nv12, OUT_W * OUT_H * 3 / 2);
+		tpu.busy = 1;
+		pthread_cond_broadcast(&tpu.cond);
+	}
+	while (wait && tpu.busy)
+		pthread_cond_wait(&tpu.cond, &tpu.lock);
+	n = tpu.nbox;
+	memcpy(box, tpu.box, n * sizeof(box[0]));
+	pthread_mutex_unlock(&tpu.lock);
+	det_draw_nv12(nv12, OUT_W, OUT_H, box, n, names);
+	return n;
+}
+
+static void tpu_stop(void)
+{
+	const struct det_stats *st;
+
+	pthread_mutex_lock(&tpu.lock);
+	tpu.quit = 1;
+	pthread_cond_broadcast(&tpu.cond);
+	pthread_mutex_unlock(&tpu.lock);
+	pthread_join(tpu.thread, NULL);
+	st = det_stats(tpu.d);
+	if (st->runs)
+		fprintf(stderr, "detector: %d runs. Per run: input %.1f ms, "
+			"TPU %.1f ms, decode %.1f ms\n", st->runs,
+			st->load_ms / st->runs, st->tpu_ms / st->runs,
+			st->post_ms / st->runs);
+	det_close(tpu.d);
+}
+
+static void print_boxes(const struct det_box *b, int n,
+			const char *const *names)
+{
+	int i;
+
+	fprintf(stderr, "  %d objects:", n);
+	for (i = 0; i < n; i++)
+		fprintf(stderr, " %s %.0f%% (%.0f,%.0f %.0fx%.0f)",
+			names ? names[b[i].cls] : "?", b[i].score * 100,
+			b[i].x1, b[i].y1, b[i].x2 - b[i].x1, b[i].y2 - b[i].y1);
+	fprintf(stderr, "\n");
+}
+#endif
+
 int main(int argc, char **argv)
 {
 	const char *cam_dev = NULL, *in_file = NULL, *out_file = "out.h264";
 	const char *yuv_file = NULL, *sensor_dev = NULL;
+	const char *model = NULL, *names_list = NULL;
+	float thresh = 0.5f;
+#ifdef WITH_TPU
+	const char *const *names = NULL;
+	struct det_box box[DET_MAX];
+	int nbox = 0;
+#endif
 	char enc_dev[300] = "", sensor_path[300];
 	int manual = 0, mains_hz = 50, max_gain = 32;
 	int frames = 300, qp = 30, gop = 30, sat = 384, jpeg = 0, quality = 85;
@@ -513,14 +655,14 @@ int main(int argc, char **argv)
 	struct buf cam[NBUF_CAM], eout[NBUF_ENC_OUT], ecap[NBUF_ENC_CAP];
 	int stride = (RAW_W * 3 / 2 + 15) / 16 * 16;
 	int cfd = -1, efd, ifd = -1, ofd, opt, n, free_out = NBUF_ENC_OUT;
-	int cam_cached = 0;
+	int cam_cached = 0, to_stdout = 0;
 	size_t raw_size, nv12_size = OUT_W * OUT_H * 3 / 2;
 	uint8_t *raw, *nv12;
 	double t_cap = 0, t_conv = 0, t_enc = 0, t0, t1, t_start;
 	long long bytes = 0;
 	off_t in_frames = 0;
 
-	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:S:MF:G:")) != -1) {
+	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:S:MF:G:d:t:L:")) != -1) {
 		switch (opt) {
 		case 'c': cam_dev = optarg; break;
 		case 'i': in_file = optarg; break;
@@ -539,12 +681,16 @@ int main(int argc, char **argv)
 		case 'M': manual = 1; break;
 		case 'F': mains_hz = atoi(optarg); break;
 		case 'G': max_gain = atoi(optarg); break;
+		case 'd': model = optarg; break;
+		case 't': thresh = atof(optarg); break;
+		case 'L': names_list = optarg; break;
 		default:
 			fprintf(stderr, "usage: %s -c /dev/videoN | -i cap.raw "
 				"[-e enc] [-o out.h264] [-n frames] [-q qp] "
 				"[-g gop] [-s saturation] [-y out.nv12] "
 				"[-x] [-j] [-Q quality] [-b bytes] "
-				"[-S subdev] [-M] [-F hz] [-G gain]\n",
+				"[-S subdev] [-M] [-F hz] [-G gain] "
+				"[-d model] [-t thresh] [-L names]\n",
 				argv[0]);
 			return 1;
 		}
@@ -557,6 +703,14 @@ int main(int argc, char **argv)
 		fprintf(stderr, "give -j or -x, not both\n");
 		return 1;
 	}
+#ifndef WITH_TPU
+	if (model) {
+		fprintf(stderr, "-d: built without TPU support (-DWITH_TPU)\n");
+		return 1;
+	}
+	(void)names_list;
+	(void)thresh;
+#endif
 	enc_name = jpeg ? "coda-jpeg-encoder" :
 		   hevc ? "wave420l-encoder" : "coda-video-encoder";
 	if (!strcmp(out_file, "out.h264") && (jpeg || hevc))
@@ -674,6 +828,30 @@ int main(int argc, char **argv)
 		stream(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, 1);
 	}
 
+	if (yuv_file)
+		out_file = yuv_file;
+	if (!strcmp(out_file, "-")) {
+		/*
+		 * The stream gets its own descriptor, and stdout goes to
+		 * stderr: library messages (the TPU runtime prints some) must
+		 * not get into the stream.
+		 */
+		to_stdout = 1;
+		ofd = dup(STDOUT_FILENO);
+		if (ofd >= 0 && dup2(STDERR_FILENO, STDOUT_FILENO) < 0)
+			die("dup2");
+	} else {
+		ofd = open(out_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	}
+	if (ofd < 0)
+		die(out_file);
+
+#ifdef WITH_TPU
+	/* Load the model before the camera starts */
+	if (model)
+		tpu_start(model, names_list, thresh, &names);
+#endif
+
 	if (cfd >= 0) {
 		/*
 		 * Cached buffers: the kernel invalidates the cache at DQBUF,
@@ -690,14 +868,6 @@ int main(int argc, char **argv)
 		stream(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, 1);
 	}
 
-	if (yuv_file)
-		out_file = yuv_file;
-	if (!strcmp(out_file, "-"))
-		ofd = STDOUT_FILENO;
-	else
-		ofd = open(out_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	if (ofd < 0)
-		die(out_file);
 	signal(SIGINT, on_sigint);
 	build_luts();
 	fprintf(stderr, "%s -> %dx%d NV12 -> %s -> %s, ",
@@ -744,6 +914,12 @@ int main(int argc, char **argv)
 		raw_to_nv12(src, stride, nv12, sat);
 		if (ci >= 0)
 			qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, ci, 0);
+#ifdef WITH_TPU
+		if (tpu.d)
+			nbox = tpu_frame(nv12, ifd >= 0, names, box);
+		if (tpu.d && (n % 30 == 0 || ifd >= 0))
+			print_boxes(box, nbox, names);
+#endif
 		if (yuv_file) {
 			if (write(ofd, nv12, nv12_size) != (ssize_t)nv12_size)
 				die("write");
@@ -775,7 +951,7 @@ int main(int argc, char **argv)
 		 * An access unit delimiter ends the picture: a stream reader
 		 * can then send it at once, not at the next picture.
 		 */
-		if (!jpeg && ofd == STDOUT_FILENO &&
+		if (!jpeg && to_stdout &&
 		    (hevc ? write(ofd, "\0\0\0\1\x46\x01\x50", 7) != 7 :
 			    write(ofd, "\0\0\0\1\x09\xf0", 6) != 6))
 			die("write");
@@ -794,6 +970,10 @@ int main(int argc, char **argv)
 				expo);
 	}
 	t1 = now_ms();
+#ifdef WITH_TPU
+	if (tpu.d)
+		tpu_stop();
+#endif
 
 	if (n > 0)
 		fprintf(stderr, "%d frames in %.1f s: %.1f fps, %.0f kbit/s at "
