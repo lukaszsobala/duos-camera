@@ -49,15 +49,18 @@
  * ISP mode: the camera node gives NV12 (or NV21: the program asks for NV12)
  * from the hardware ISP, at the sensor size: BT.601 limited range for
  * H.264, full range for JPEG. The encoder reads the camera
- * buffers through DMABUF, without a copy. The frames in camera buffer 0
- * (every 4th frame) give the statistics, from every 16th pixel: linear RGB
- * through the inverse BT.601 matrix and the sRGB curve. They
- * are computed while the encoder reads the frame. The other buffers skip
- * the kernel's cache invalidate, and no buffer needs a cache clean: the CPU
- * never writes them. Auto exposure sets the sensor for a mean luminance of
- * 18%, with no software gain. White balance is gray world: it sets the
- * ISP's red and blue gains for equal linear means. No detection in ISP
- * mode. -K keeps the kernel's full cache syncs, for comparison.
+ * buffers through DMABUF, without a copy. Capture, encoding and output
+ * overlap: eight camera buffers give room for frames in the encoder and
+ * for stalls of the output. The summary counts the frames the ISP dropped.
+ * Every 4th camera buffer (every 4th frame) gives the statistics, from
+ * every 16th pixel: linear RGB through the inverse BT.601 matrix and the
+ * sRGB curve. They are computed while the encoder reads the frame. The
+ * other buffers skip the kernel's cache invalidate, and no buffer needs a
+ * cache clean: the CPU never writes them. Auto exposure sets the sensor for
+ * a mean luminance of 18%, with no software gain. White balance is gray
+ * world: it sets the ISP's red and blue gains for equal linear means. No
+ * detection in ISP mode. -K keeps the kernel's full cache syncs, for
+ * comparison.
  *
  * Detection: a second thread takes the newest frame whenever the TPU is
  * free. Each frame gets the latest boxes. With -i, each frame waits for
@@ -80,6 +83,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -95,6 +99,7 @@
 #define OUT_H	(RAW_H / 2)
 #define BLACK	16		/* 64 in 10 bits, in the top 8 bits */
 #define NBUF_CAM 4
+#define NBUF_ISP 8		/* ISP mode: room for frames in the encoder */
 #define NBUF_ENC_OUT 2
 #define NBUF_ENC_CAP 4
 
@@ -681,7 +686,10 @@ static void qbuf(int fd, enum v4l2_buf_type type, int i, size_t used)
 	xioctl(fd, VIDIOC_QBUF, &vb, "VIDIOC_QBUF");
 }
 
-static uint32_t dq_flags;	/* the flags of the last dequeued buffer */
+/* The flags, sequence and timestamp of the last dequeued buffer */
+static uint32_t dq_flags, dq_seq;
+static struct timeval dq_tv;
+static double dq_ts;		/* dq_tv in ms */
 
 static int dqbuf(int fd, enum v4l2_buf_type type, size_t *used)
 {
@@ -695,6 +703,9 @@ static int dqbuf(int fd, enum v4l2_buf_type type, size_t *used)
 	if (used)
 		*used = vb.bytesused;
 	dq_flags = vb.flags;
+	dq_seq = vb.sequence;
+	dq_tv = vb.timestamp;
+	dq_ts = vb.timestamp.tv_sec * 1e3 + vb.timestamp.tv_usec / 1e3;
 	return vb.index;
 }
 
@@ -723,12 +734,17 @@ static void stream(int fd, enum v4l2_buf_type type, int on)
 	       on ? "VIDIOC_STREAMON" : "VIDIOC_STREAMOFF");
 }
 
-/* Encoder input from a camera buffer, through its DMABUF */
-static void qbuf_dmabuf(int fd, int i, int dmafd, size_t len)
+/*
+ * Encoder input from a camera buffer, through its DMABUF. The encoder
+ * copies ts, the camera timestamp, to the encoded frame.
+ */
+static void qbuf_dmabuf(int fd, int i, int dmafd, size_t len,
+			struct timeval ts)
 {
 	struct v4l2_buffer vb = {
 		.index = i, .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
 		.memory = V4L2_MEMORY_DMABUF, .bytesused = len, .length = len,
+		.timestamp = ts,
 	};
 
 	vb.m.fd = dmafd;
@@ -766,82 +782,134 @@ static void isp_3a(int fd, const uint8_t *f, int w, int h, int bpl,
 	isp_n_3a++;
 }
 
+/* ISP mode: statistics from every 4th camera buffer, so every 4th frame */
+#define ISP_MEAS(i)	((i) % 4 == 0)
+
 /*
- * ISP mode: camera buffer i goes to the encoder as its input buffer i, and
- * back to the camera when the encoder is done with it. efd < 0: write the
- * NV12 frames to ofd instead. hints: cache hints on the camera buffers.
- * Returns the number of frames.
+ * ISP mode, with the encoder: camera buffer i goes to the encoder as its
+ * input buffer i, and back to the camera when the encoder is done with it.
+ * Each step waits for whichever comes first: a camera frame, an encoded
+ * frame, or an input buffer the encoder is done with. The encoder can hold
+ * several frames, so capture, encoding and output overlap. hints: cache
+ * hints on the camera buffers. Returns the number of encoded frames.
  */
 static int isp_loop(int cfd, int efd, int ofd, const struct buf *cam,
 		    const int *dmafd, const struct buf *ecap, int w, int h,
 		    int bpl, int frames, int jpeg, int hevc, int to_stdout,
-		    int hints, long long *bytes, double *t_enc)
+		    int hints, long long *bytes, double *t_lat, int *lost)
 {
 	size_t size = (size_t)bpl * h * 3 / 2, used = 0;
 	struct yuv_stats st = { 0 };
-	int n, i, k, meas;
-	double t0;
+	struct pollfd pfd[2] = {
+		{ .fd = cfd, .events = POLLIN },
+		{ .fd = efd, .events = POLLIN | POLLOUT },
+	};
+	int n = 0, done = 0, i, k;
+	uint32_t seq = 0;
+
+	while (!stop && (frames == 0 || done < frames)) {
+		/* poll() skips a negative fd: no more frames are needed */
+		pfd[0].fd = frames == 0 || n < frames ? cfd : -1;
+		if (poll(pfd, 2, -1) < 0) {
+			if (errno == EINTR)
+				continue;
+			die("poll");
+		}
+		if ((pfd[0].revents | pfd[1].revents) & (POLLERR | POLLNVAL)) {
+			fprintf(stderr, "poll: error on the %s\n",
+				pfd[0].revents & (POLLERR | POLLNVAL) ?
+				"camera" : "encoder");
+			break;
+		}
+
+		/* A camera frame: to the encoder at once */
+		if (pfd[0].revents & POLLIN) {
+			i = dqbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, NULL);
+			if (i < 0)
+				break;
+			/* A gap in the sequence: frames the ISP dropped */
+			if (n > 0)
+				*lost += dq_seq - seq;
+			seq = dq_seq + 1;
+			qbuf_dmabuf(efd, i, dmafd[i], size, dq_tv);
+			n++;
+			/*
+			 * Both only read the frame: the CPU works while the
+			 * encoder does. The camera and the ISP apply new
+			 * settings a few frames later.
+			 */
+			if (ISP_MEAS(i) && !(dq_flags & V4L2_BUF_FLAG_ERROR))
+				isp_3a(cfd, cam[i].p, w, h, bpl, &st);
+		}
+
+		/* An input frame the encoder is done with: back to the camera */
+		if (pfd[1].revents & POLLOUT) {
+			k = dqbuf_dmabuf(efd);
+			if (k < 0) {
+				perror("encoder input VIDIOC_DQBUF");
+				break;
+			}
+			if (hints)
+				isp_requeue(cfd, k, ISP_MEAS(k));
+			else
+				qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, k, 0);
+		}
+
+		/* An encoded frame: write it */
+		if (pfd[1].revents & POLLIN) {
+			k = dqbuf(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, &used);
+			if (k < 0) {
+				perror("encoder VIDIOC_DQBUF");
+				break;
+			}
+			/* The encoder copies the camera timestamp */
+			if (dq_ts > 0)
+				*t_lat += now_ms() - dq_ts;
+			if (write(ofd, ecap[k].p, used) != (ssize_t)used)
+				die("write");
+			if (!jpeg && to_stdout &&
+			    (hevc ? write(ofd, "\0\0\0\1\x46\x01\x50", 7) != 7 :
+				    write(ofd, "\0\0\0\1\x09\xf0", 6) != 6))
+				die("write");
+			*bytes += used;
+			qbuf(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, k, 0);
+
+			if (done % 30 == 0)
+				fprintf(stderr, "frame %d: %zu bytes, lost %d, "
+					"luminance %.3f, clipped %.1f%%, top 2%% %d, "
+					"ISP WB R %.2f B %.2f, exposure %d lines, "
+					"gain %.2fx\n", done, used, *lost, st.lum,
+					st.clipped * 100, st.hi, isp_r, isp_b,
+					ae.exp, ae.fd >= 0 ?
+					(double)ae.gain / ae.gain_min : 0);
+			done++;
+		}
+	}
+	return done;
+}
+
+/* ISP mode without the encoder: the NV12 frames go to ofd */
+static int isp_loop_file(int cfd, int ofd, const struct buf *cam, int w,
+			 int h, int bpl, int frames, int hints, long long *bytes)
+{
+	size_t size = (size_t)bpl * h * 3 / 2;
+	struct yuv_stats st = { 0 };
+	int n, i;
 
 	for (n = 0; !stop && (frames == 0 || n < frames); n++) {
 		i = dqbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, NULL);
 		if (i < 0)
 			break;
-		/*
-		 * Statistics from buffer 0 only: the buffers come in turn, so
-		 * every 4th frame. The camera and the ISP apply new settings a
-		 * few frames later.
-		 */
-		meas = i == 0 && !(dq_flags & V4L2_BUF_FLAG_ERROR);
-
-		if (efd < 0) {
-			if (meas)
-				isp_3a(cfd, cam[i].p, w, h, bpl, &st);
-			if (write(ofd, cam[i].p, size) != (ssize_t)size)
-				die("write");
-			/* The CPU reads every buffer here */
-			if (hints)
-				isp_requeue(cfd, i, 1);
-			else
-				qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, i, 0);
-			*bytes += size;
-			continue;
-		}
-
-		t0 = now_ms();
-		qbuf_dmabuf(efd, i, dmafd[i], size);
-		/* Both only read the frame: the CPU works while the encoder does */
-		if (meas)
+		if (ISP_MEAS(i) && !(dq_flags & V4L2_BUF_FLAG_ERROR))
 			isp_3a(cfd, cam[i].p, w, h, bpl, &st);
-		k = dqbuf(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, &used);
-		if (k < 0) {
-			perror("encoder VIDIOC_DQBUF");
-			break;
-		}
-		if (write(ofd, ecap[k].p, used) != (ssize_t)used)
+		if (write(ofd, cam[i].p, size) != (ssize_t)size)
 			die("write");
-		if (!jpeg && to_stdout &&
-		    (hevc ? write(ofd, "\0\0\0\1\x46\x01\x50", 7) != 7 :
-			    write(ofd, "\0\0\0\1\x09\xf0", 6) != 6))
-			die("write");
-		*bytes += used;
-		qbuf(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, k, 0);
-		k = dqbuf_dmabuf(efd);
-		if (k < 0) {
-			perror("encoder input VIDIOC_DQBUF");
-			break;
-		}
+		/* The CPU reads every buffer here */
 		if (hints)
-			isp_requeue(cfd, k, k == 0);
+			isp_requeue(cfd, i, 1);
 		else
-			qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, k, 0);
-		*t_enc += now_ms() - t0;
-
-		if (n % 30 == 0)
-			fprintf(stderr, "frame %d: %zu bytes, luminance %.3f, "
-				"clipped %.1f%%, top 2%% %d, ISP WB R %.2f B %.2f, "
-				"exposure %d lines, gain %.2fx\n", n, used, st.lum,
-				st.clipped * 100, st.hi, isp_r, isp_b, ae.exp,
-				ae.fd >= 0 ? (double)ae.gain / ae.gain_min : 0);
+			qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, i, 0);
+		*bytes += size;
 	}
 	return n;
 }
@@ -978,12 +1046,12 @@ int main(int argc, char **argv)
 	char enc_dev[300] = "", sensor_path[300];
 	int manual = 0, mains_hz = 50, max_gain = 32, black = 252;
 	int isp = 0, out_w = OUT_W, out_h = OUT_H, out_bpl = OUT_W;
-	int dmafd[NBUF_CAM];
+	int dmafd[NBUF_ISP], ncam = NBUF_CAM, lost = 0;
 	int frames = 300, qp = 30, gop = 30, sat = 384, jpeg = 0, quality = 85;
 	int hevc = 0;
 	size_t cap_size = 0;
 	const char *enc_name;
-	struct buf cam[NBUF_CAM], eout[NBUF_ENC_OUT], ecap[NBUF_ENC_CAP];
+	struct buf cam[NBUF_ISP], eout[NBUF_ENC_OUT], ecap[NBUF_ENC_CAP];
 	int stride = (RAW_W * 3 / 2 + 15) / 16 * 16;
 	int cfd = -1, efd, ifd = -1, ofd, opt, n, free_out = NBUF_ENC_OUT;
 	int cam_cached = 0, to_stdout = 0, no_hints = 0;
@@ -1067,6 +1135,7 @@ int main(int argc, char **argv)
 		    f.fmt.pix.pixelformat == V4L2_PIX_FMT_NV21) {
 			/* The ISP node: full size, NV12 for the encoder */
 			isp = 1;
+			ncam = NBUF_ISP;
 			f.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
 			/* JPEG is full range; H.264 without VUI is limited */
 			f.fmt.pix.priv = V4L2_PIX_FMT_PRIV_MAGIC;
@@ -1187,12 +1256,12 @@ int main(int argc, char **argv)
 		if (isp) {
 			/* The camera buffers are the encoder input */
 			struct v4l2_requestbuffers rb = {
-				.count = NBUF_CAM, .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
+				.count = ncam, .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
 				.memory = V4L2_MEMORY_DMABUF,
 			};
 
 			xioctl(efd, VIDIOC_REQBUFS, &rb, "encoder VIDIOC_REQBUFS");
-			if (rb.count < NBUF_CAM) {
+			if ((int)rb.count < ncam) {
 				fprintf(stderr, "encoder: only %u input buffers\n",
 					rb.count);
 				return 1;
@@ -1239,13 +1308,13 @@ int main(int argc, char **argv)
 		 * copy with wide loads is faster than reading in place.
 		 */
 		cam_cached = map_bufs(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, cam,
-				      NBUF_CAM, V4L2_MEMORY_FLAG_NON_COHERENT) &
+				      ncam, V4L2_MEMORY_FLAG_NON_COHERENT) &
 			     V4L2_MEMORY_FLAG_NON_COHERENT;
 		fprintf(stderr, "camera buffers: %s\n",
 			!cam_cached ? (isp ? "uncached" : "uncached, copied") :
 			!isp ? "cached" : no_hints ? "cached, full cache syncs" :
 			"cached, cache hints");
-		for (n = 0; isp && n < NBUF_CAM; n++) {
+		for (n = 0; isp && n < ncam; n++) {
 			struct v4l2_exportbuffer eb = {
 				.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .index = n,
 				.flags = O_RDWR | O_CLOEXEC,
@@ -1260,7 +1329,7 @@ int main(int argc, char **argv)
 			isp_set_wb(cfd);
 			build_srgb_lin();
 		}
-		for (n = 0; n < NBUF_CAM; n++)
+		for (n = 0; n < ncam; n++)
 			qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, n, 0);
 		stream(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, 1);
 	}
@@ -1278,10 +1347,13 @@ int main(int argc, char **argv)
 	t_start = now_ms();
 	getrusage(RUSAGE_SELF, &ru0);
 	n = 0;
-	if (isp)
+	if (isp && efd >= 0)
 		n = isp_loop(cfd, efd, ofd, cam, dmafd, ecap, out_w, out_h,
 			     out_bpl, frames, jpeg, hevc, to_stdout,
-			     cam_cached && !no_hints, &bytes, &t_enc);
+			     cam_cached && !no_hints, &bytes, &t_enc, &lost);
+	else if (isp)
+		n = isp_loop_file(cfd, ofd, cam, out_w, out_h, out_bpl, frames,
+				  cam_cached && !no_hints, &bytes);
 	for (; !isp && !stop && (frames == 0 || n < frames); n++) {
 		const uint8_t *src = raw;
 		size_t used;
@@ -1381,10 +1453,10 @@ int main(int argc, char **argv)
 
 	if (n > 0 && isp)
 		fprintf(stderr, "%d frames in %.1f s: %.1f fps, %.0f kbit/s at "
-			"30 fps. Per frame: encode %.1f ms. Statistics: %d "
-			"times, %.2f ms each\n", n, (t1 - t_start) / 1e3,
-			n * 1e3 / (t1 - t_start), bytes * 8.0 * 30 / n / 1e3,
-			t_enc / n, isp_n_3a,
+			"30 fps, %d frames lost. Latency from frame start to "
+			"stream %.1f ms. Statistics: %d times, %.2f ms each\n",
+			n, (t1 - t_start) / 1e3, n * 1e3 / (t1 - t_start),
+			bytes * 8.0 * 30 / n / 1e3, lost, t_enc / n, isp_n_3a,
 			isp_n_3a ? isp_t_3a / isp_n_3a : 0);
 	else if (n > 0)
 		fprintf(stderr, "%d frames in %.1f s: %.1f fps, %.0f kbit/s at "
