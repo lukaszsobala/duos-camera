@@ -1,8 +1,9 @@
 # ISP: YUV frames from the SG2000 hardware ISP
 
 Goal: 1920x1080 NV21 or NV12 frames from the GC2083 at 29.7 fps, with no CPU
-debayer. Status (2026-11-02): written and compile-tested, not run on
-hardware.
+debayer. Status (2026-11-02): works on the Duo S (RISC-V). 1080p H.264 over
+RTSP with auto exposure and white balance, correct colours, no ISP stalls.
+Not tested on the Arm core.
 
 ## Where the code is
 
@@ -134,7 +135,8 @@ The steps use the tools of this repository, installed with `make install`
   driver now gives limited range, and full range when the application
   sets `V4L2_PIX_FMT_FLAG_SET_CSC` with `V4L2_QUANTIZATION_FULL_RANGE`
   (cam2h264 does for JPEG). The status file shows `isp output limited
-  range` or `full range`. Not tested on the board yet.
+  range` or `full range`. Tested 2026-11-02: limited range, correct
+  colours and contrast over RTSP.
 - Whether the output DMA accepts software-set strides. The vendor lets the
   hardware set them. The driver writes the same values the vendor
   computes, so for 1920 wide frames both give the same result.
