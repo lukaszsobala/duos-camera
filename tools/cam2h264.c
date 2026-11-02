@@ -36,6 +36,9 @@
  *   -B N     ISP mode: black level in 12-bit units (default 252, the
  *            GC2083's)
  *   -K       ISP mode: no cache hints on the camera buffers
+ *   -Y N     ISP mode: luma noise reduction strength at 20x gain, scaled
+ *            with the square root of the gain, off below 2x. 0 = off
+ *            (default 10)
  *
  * The input is packed RAW12, RGGB, 1920x1080, 10-bit data in the top bits.
  * Each 2x2 Bayer cell becomes one output pixel: 960x540. The program uses
@@ -124,6 +127,7 @@ static int awb_done;
 #define ISP_AE_TARGET	0.18		/* mean linear luminance */
 #define ISP_CID_BLACK_LEVEL	(V4L2_CID_USER_BASE | 0x1000)
 #define ISP_CID_CCM		(V4L2_CID_USER_BASE | 0x1001)
+#define ISP_CID_NR_LUMA		(V4L2_CID_USER_BASE | 0x1003)
 #define ISP_STEP	16		/* statistics from every 16th pixel */
 #define ISP_SAT		2.0		/* default saturation of the colour matrix */
 #define ISP_AE_HI	240		/* the brightest 2% stay below this */
@@ -131,6 +135,8 @@ static float srgb_lin[256];		/* sRGB-encoded 8-bit value, linear */
 static double isp_r = 1.6, isp_b = 1.6;	/* ISP white balance gains */
 static int isp_full;			/* full-range YUV, else limited */
 static double isp_sat = 1;		/* saturation of the ISP colour matrix */
+static int isp_nr20 = 10;		/* luma noise reduction at 20x gain */
+static int isp_nr = -1;			/* the strength in use, -1: not set */
 /* Linear luminance weights: the colour matrix keeps this sum */
 static const double lum_w[3] = { 0.2126, 0.7152, 0.0722 };
 
@@ -817,6 +823,33 @@ static double isp_t_3a;	/* time in isp_3a(), ms */
 static int isp_n_3a;		/* calls of isp_3a() */
 
 /* Statistics of one frame, then one step of auto exposure and white balance */
+/*
+ * Luma noise reduction for the sensor gain in use. At a fixed output
+ * brightness, the noise grows about with the square root of the gain.
+ * Below 2x, the picture stays sharp. On the board, 10 at 20x removed the
+ * grain; above 20 the picture went soft.
+ */
+static void isp_nr_update(int fd)
+{
+	struct v4l2_ext_control c = { .id = ISP_CID_NR_LUMA };
+	struct v4l2_ext_controls cs = {
+		.which = V4L2_CTRL_WHICH_CUR_VAL, .count = 1, .controls = &c,
+	};
+	double g = (double)ae.gain / ae.gain_min;
+	long v = g < 2 ? 0 : lround(isp_nr20 * sqrt(g / 20));
+
+	c.value = v > 255 ? 255 : v;
+	if (c.value == isp_nr)
+		return;
+	if (ioctl(fd, VIDIOC_S_EXT_CTRLS, &cs) < 0) {
+		fprintf(stderr, "warning: no ISP noise reduction: %s\n",
+			strerror(errno));
+		isp_nr20 = 0;		/* do not try again */
+		return;
+	}
+	isp_nr = c.value;
+}
+
 static void isp_3a(int fd, const uint8_t *f, int w, int h, int bpl,
 		   struct yuv_stats *st)
 {
@@ -825,6 +858,8 @@ static void isp_3a(int fd, const uint8_t *f, int w, int h, int bpl,
 	yuv_measure(f, w, h, bpl, ISP_STEP, st);
 	if (ae.fd >= 0)
 		isp_ae(st);
+	if (ae.fd >= 0 && isp_nr20 > 0)
+		isp_nr_update(fd);
 	isp_awb(fd, st);
 	isp_t_3a += now_ms() - t0;
 	isp_n_3a++;
@@ -926,10 +961,11 @@ static int isp_loop(int cfd, int efd, int ofd, const struct buf *cam,
 				fprintf(stderr, "frame %d: %zu bytes, lost %d, "
 					"luminance %.3f, clipped %.1f%%, top 2%% %d, "
 					"ISP WB R %.2f B %.2f, exposure %d lines, "
-					"gain %.2fx\n", done, used, *lost, st.lum,
-					st.clipped * 100, st.hi, isp_r, isp_b,
+					"gain %.2fx, NR %d\n", done, used, *lost,
+					st.lum, st.clipped * 100, st.hi, isp_r, isp_b,
 					ae.exp, ae.fd >= 0 ?
-					(double)ae.gain / ae.gain_min : 0);
+					(double)ae.gain / ae.gain_min : 0,
+					isp_nr > 0 ? isp_nr : 0);
 			done++;
 		}
 	}
@@ -1110,7 +1146,7 @@ int main(int argc, char **argv)
 	long long bytes = 0;
 	off_t in_frames = 0;
 
-	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:S:MF:G:d:t:L:B:K")) != -1) {
+	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:S:MF:G:d:t:L:B:KY:")) != -1) {
 		switch (opt) {
 		case 'c': cam_dev = optarg; break;
 		case 'i': in_file = optarg; break;
@@ -1134,13 +1170,14 @@ int main(int argc, char **argv)
 		case 'L': names_list = optarg; break;
 		case 'B': black = atoi(optarg); break;
 		case 'K': no_hints = 1; break;
+		case 'Y': isp_nr20 = atoi(optarg); break;
 		default:
 			fprintf(stderr, "usage: %s -c /dev/videoN | -i cap.raw "
 				"[-e enc] [-o out.h264] [-n frames] [-q qp] "
 				"[-g gop] [-s saturation] [-y out.nv12] "
 				"[-x] [-j] [-Q quality] [-b bytes] "
 				"[-S subdev] [-M] [-F hz] [-G gain] "
-				"[-d model] [-t thresh] [-L names] [-B black] [-K]\n",
+				"[-d model] [-t thresh] [-L names] [-B black] [-K] [-Y nr]\n",
 				argv[0]);
 			return 1;
 		}

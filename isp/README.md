@@ -135,9 +135,14 @@ The steps use the tools of this repository, installed with `make install`
        v4l2-ctl -d $V -l | grep noise         # the values in use
 
    Expected: smaller frames and a calmer picture, with edges kept. Too much
-   makes the picture smeared. Note the strengths that look best at high
-   gain, and whether any stage changes nothing or breaks the picture. The
-   values come from the vendor's defaults; their effect is not known yet.
+   makes the picture smeared.
+
+   Result, 2026-11-03: luma does most of the work; 10 suits a gain of about
+   20x, above 20 the picture goes soft. Raw reduces noise but blurs the
+   picture. Chroma shows no visible change. `cam2h264` now sets the luma
+   strength from the gain (`-Y`, default 10 at 20x) and leaves raw and
+   chroma off. To tune by hand, start the stream with `-Y 0`: otherwise
+   `cam2h264` sets the luma strength itself when the gain changes.
 
 ## Report
 
