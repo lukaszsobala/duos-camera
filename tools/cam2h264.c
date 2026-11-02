@@ -34,6 +34,7 @@
  *            80-class models)
  *   -B N     ISP mode: black level in 12-bit units (default 252, the
  *            GC2083's)
+ *   -K       ISP mode: no cache hints on the camera buffers
  *
  * The input is packed RAW12, RGGB, 1920x1080, 10-bit data in the top bits.
  * Each 2x2 Bayer cell becomes one output pixel: 960x540. The program uses
@@ -47,12 +48,15 @@
  *
  * ISP mode: the camera node gives NV12 (or NV21: the program asks for NV12)
  * from the hardware ISP, at the sensor size. The encoder reads the camera
- * buffers through DMABUF, without a copy. Every 4th frame, a sample of
- * every 8th pixel gives the statistics: linear RGB through the inverse
- * BT.601 limited-range matrix and the sRGB curve. Auto exposure sets the
- * sensor for a mean luminance of 18%, with no software gain. White balance
- * is gray world: it sets the ISP's red and blue gains for equal linear
- * means. No detection in ISP mode.
+ * buffers through DMABUF, without a copy. The frames in camera buffer 0
+ * (every 4th frame) give the statistics, from every 16th pixel: linear RGB
+ * through the inverse BT.601 limited-range matrix and the sRGB curve. They
+ * are computed while the encoder reads the frame. The other buffers skip
+ * the kernel's cache invalidate, and no buffer needs a cache clean: the CPU
+ * never writes them. Auto exposure sets the sensor for a mean luminance of
+ * 18%, with no software gain. White balance is gray world: it sets the
+ * ISP's red and blue gains for equal linear means. No detection in ISP
+ * mode. -K keeps the kernel's full cache syncs, for comparison.
  *
  * Detection: a second thread takes the newest frame whenever the TPU is
  * free. Each frame gets the latest boxes. With -i, each frame waits for
@@ -77,6 +81,7 @@
 #include <dirent.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <linux/videodev2.h>
 #ifdef WITH_TPU
 #include <pthread.h>
@@ -111,6 +116,7 @@ static int awb_done;
 /* ISP mode */
 #define ISP_AE_TARGET	0.18		/* mean linear luminance */
 #define ISP_CID_BLACK_LEVEL	(V4L2_CID_USER_BASE | 0x1000)
+#define ISP_STEP	16		/* statistics from every 16th pixel */
 static float srgb_lin[256];		/* sRGB-encoded 8-bit value, linear */
 static double isp_r = 1.6, isp_b = 1.6;	/* ISP white balance gains */
 
@@ -549,12 +555,20 @@ static void yuv_measure(const uint8_t *f, int w, int h, int bpl, int step,
 	st->b = nwb ? sb / nwb : 0;
 }
 
+/* Both gains in one call: the ISP takes them for the same frame */
 static void isp_set_wb(int fd)
 {
-	set_ctrl(fd, V4L2_CID_RED_BALANCE, (int)(isp_r * 1024 + 0.5),
-		 "ISP red gain");
-	set_ctrl(fd, V4L2_CID_BLUE_BALANCE, (int)(isp_b * 1024 + 0.5),
-		 "ISP blue gain");
+	struct v4l2_ext_control c[2] = {
+		{ .id = V4L2_CID_RED_BALANCE, .value = (int)(isp_r * 1024 + 0.5) },
+		{ .id = V4L2_CID_BLUE_BALANCE, .value = (int)(isp_b * 1024 + 0.5) },
+	};
+	struct v4l2_ext_controls cs = {
+		.which = V4L2_CTRL_WHICH_CUR_VAL, .count = 2, .controls = c,
+	};
+
+	if (ioctl(fd, VIDIOC_S_EXT_CTRLS, &cs) < 0)
+		fprintf(stderr, "warning: ISP white balance R %d B %d: %s\n",
+			c[0].value, c[1].value, strerror(errno));
 }
 
 static double clampd(double v, double lo, double hi)
@@ -630,6 +644,8 @@ static void qbuf(int fd, enum v4l2_buf_type type, int i, size_t used)
 	xioctl(fd, VIDIOC_QBUF, &vb, "VIDIOC_QBUF");
 }
 
+static uint32_t dq_flags;	/* the flags of the last dequeued buffer */
+
 static int dqbuf(int fd, enum v4l2_buf_type type, size_t *used)
 {
 	struct v4l2_buffer vb = { .type = type, .memory = V4L2_MEMORY_MMAP };
@@ -641,7 +657,27 @@ static int dqbuf(int fd, enum v4l2_buf_type type, size_t *used)
 	}
 	if (used)
 		*used = vb.bytesused;
+	dq_flags = vb.flags;
 	return vb.index;
+}
+
+/*
+ * Give a camera buffer back in ISP mode. The CPU never writes the buffers,
+ * so they need no cache clean. inval = 0: the CPU does not read this
+ * buffer, so it needs no cache invalidate either. The kernel keeps these
+ * hints for the buffer, also on later QBUFs without them. The first QBUF
+ * of each buffer must have no hints: it cleans the zeroed memory.
+ */
+static void isp_requeue(int fd, int i, int inval)
+{
+	struct v4l2_buffer vb = {
+		.index = i, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+		.memory = V4L2_MEMORY_MMAP,
+		.flags = V4L2_BUF_FLAG_NO_CACHE_CLEAN |
+			 (inval ? 0 : V4L2_BUF_FLAG_NO_CACHE_INVALIDATE),
+	};
+
+	xioctl(fd, VIDIOC_QBUF, &vb, "VIDIOC_QBUF");
 }
 
 static void stream(int fd, enum v4l2_buf_type type, int on)
@@ -676,46 +712,70 @@ static int dqbuf_dmabuf(int fd)
 	return vb.index;
 }
 
+static double isp_t_3a;	/* time in isp_3a(), ms */
+static int isp_n_3a;		/* calls of isp_3a() */
+
+/* Statistics of one frame, then one step of auto exposure and white balance */
+static void isp_3a(int fd, const uint8_t *f, int w, int h, int bpl,
+		   struct yuv_stats *st)
+{
+	double t0 = now_ms();
+
+	yuv_measure(f, w, h, bpl, ISP_STEP, st);
+	if (ae.fd >= 0)
+		ae_step(ISP_AE_TARGET / (st->lum > 1e-3 ? st->lum : 1e-3),
+			st->clipped, 0);
+	isp_awb(fd, st);
+	isp_t_3a += now_ms() - t0;
+	isp_n_3a++;
+}
+
 /*
  * ISP mode: camera buffer i goes to the encoder as its input buffer i, and
  * back to the camera when the encoder is done with it. efd < 0: write the
- * NV12 frames to ofd instead. Returns the number of frames.
+ * NV12 frames to ofd instead. hints: cache hints on the camera buffers.
+ * Returns the number of frames.
  */
 static int isp_loop(int cfd, int efd, int ofd, const struct buf *cam,
 		    const int *dmafd, const struct buf *ecap, int w, int h,
 		    int bpl, int frames, int jpeg, int hevc, int to_stdout,
-		    int step, long long *bytes, double *t_enc)
+		    int hints, long long *bytes, double *t_enc)
 {
 	size_t size = (size_t)bpl * h * 3 / 2, used = 0;
 	struct yuv_stats st = { 0 };
-	int n, i, k;
+	int n, i, k, meas;
 	double t0;
 
 	for (n = 0; !stop && (frames == 0 || n < frames); n++) {
 		i = dqbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, NULL);
 		if (i < 0)
 			break;
-
-		/* The camera and the ISP apply new settings a few frames later */
-		if (n % 4 == 0) {
-			yuv_measure(cam[i].p, w, h, bpl, step, &st);
-			if (ae.fd >= 0)
-				ae_step(ISP_AE_TARGET /
-					(st.lum > 1e-3 ? st.lum : 1e-3),
-					st.clipped, 0);
-			isp_awb(cfd, &st);
-		}
+		/*
+		 * Statistics from buffer 0 only: the buffers come in turn, so
+		 * every 4th frame. The camera and the ISP apply new settings a
+		 * few frames later.
+		 */
+		meas = i == 0 && !(dq_flags & V4L2_BUF_FLAG_ERROR);
 
 		if (efd < 0) {
+			if (meas)
+				isp_3a(cfd, cam[i].p, w, h, bpl, &st);
 			if (write(ofd, cam[i].p, size) != (ssize_t)size)
 				die("write");
-			qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, i, 0);
+			/* The CPU reads every buffer here */
+			if (hints)
+				isp_requeue(cfd, i, 1);
+			else
+				qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, i, 0);
 			*bytes += size;
 			continue;
 		}
 
 		t0 = now_ms();
 		qbuf_dmabuf(efd, i, dmafd[i], size);
+		/* Both only read the frame: the CPU works while the encoder does */
+		if (meas)
+			isp_3a(cfd, cam[i].p, w, h, bpl, &st);
 		k = dqbuf(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, &used);
 		if (k < 0) {
 			perror("encoder VIDIOC_DQBUF");
@@ -734,7 +794,10 @@ static int isp_loop(int cfd, int efd, int ofd, const struct buf *cam,
 			perror("encoder input VIDIOC_DQBUF");
 			break;
 		}
-		qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, k, 0);
+		if (hints)
+			isp_requeue(cfd, k, k == 0);
+		else
+			qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, k, 0);
 		*t_enc += now_ms() - t0;
 
 		if (n % 30 == 0)
@@ -887,14 +950,15 @@ int main(int argc, char **argv)
 	struct buf cam[NBUF_CAM], eout[NBUF_ENC_OUT], ecap[NBUF_ENC_CAP];
 	int stride = (RAW_W * 3 / 2 + 15) / 16 * 16;
 	int cfd = -1, efd, ifd = -1, ofd, opt, n, free_out = NBUF_ENC_OUT;
-	int cam_cached = 0, to_stdout = 0;
+	int cam_cached = 0, to_stdout = 0, no_hints = 0;
 	size_t raw_size, nv12_size = OUT_W * OUT_H * 3 / 2;
 	uint8_t *raw, *nv12;
 	double t_cap = 0, t_conv = 0, t_enc = 0, t0, t1, t_start;
+	struct rusage ru0, ru1;
 	long long bytes = 0;
 	off_t in_frames = 0;
 
-	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:S:MF:G:d:t:L:B:")) != -1) {
+	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:S:MF:G:d:t:L:B:K")) != -1) {
 		switch (opt) {
 		case 'c': cam_dev = optarg; break;
 		case 'i': in_file = optarg; break;
@@ -917,13 +981,14 @@ int main(int argc, char **argv)
 		case 't': thresh = atof(optarg); break;
 		case 'L': names_list = optarg; break;
 		case 'B': black = atoi(optarg); break;
+		case 'K': no_hints = 1; break;
 		default:
 			fprintf(stderr, "usage: %s -c /dev/videoN | -i cap.raw "
 				"[-e enc] [-o out.h264] [-n frames] [-q qp] "
 				"[-g gop] [-s saturation] [-y out.nv12] "
 				"[-x] [-j] [-Q quality] [-b bytes] "
 				"[-S subdev] [-M] [-F hz] [-G gain] "
-				"[-d model] [-t thresh] [-L names] [-B black]\n",
+				"[-d model] [-t thresh] [-L names] [-B black] [-K]\n",
 				argv[0]);
 			return 1;
 		}
@@ -1126,8 +1191,10 @@ int main(int argc, char **argv)
 		cam_cached = map_bufs(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, cam,
 				      NBUF_CAM, V4L2_MEMORY_FLAG_NON_COHERENT) &
 			     V4L2_MEMORY_FLAG_NON_COHERENT;
-		fprintf(stderr, "camera buffers: %s\n", cam_cached ? "cached" :
-			isp ? "uncached, sampled less" : "uncached, copied");
+		fprintf(stderr, "camera buffers: %s\n",
+			!cam_cached ? (isp ? "uncached" : "uncached, copied") :
+			!isp ? "cached" : no_hints ? "cached, full cache syncs" :
+			"cached, cache hints");
 		for (n = 0; isp && n < NBUF_CAM; n++) {
 			struct v4l2_exportbuffer eb = {
 				.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .index = n,
@@ -1159,11 +1226,12 @@ int main(int argc, char **argv)
 		fprintf(stderr, "QP %d, GOP %d\n", qp, gop);
 
 	t_start = now_ms();
+	getrusage(RUSAGE_SELF, &ru0);
 	n = 0;
 	if (isp)
 		n = isp_loop(cfd, efd, ofd, cam, dmafd, ecap, out_w, out_h,
 			     out_bpl, frames, jpeg, hevc, to_stdout,
-			     cam_cached ? 8 : 16, &bytes, &t_enc);
+			     cam_cached && !no_hints, &bytes, &t_enc);
 	for (; !isp && !stop && (frames == 0 || n < frames); n++) {
 		const uint8_t *src = raw;
 		size_t used;
@@ -1255,17 +1323,32 @@ int main(int argc, char **argv)
 				expo);
 	}
 	t1 = now_ms();
+	getrusage(RUSAGE_SELF, &ru1);
 #ifdef WITH_TPU
 	if (tpu.d)
 		tpu_stop();
 #endif
 
-	if (n > 0)
+	if (n > 0 && isp)
+		fprintf(stderr, "%d frames in %.1f s: %.1f fps, %.0f kbit/s at "
+			"30 fps. Per frame: encode %.1f ms. Statistics: %d "
+			"times, %.2f ms each\n", n, (t1 - t_start) / 1e3,
+			n * 1e3 / (t1 - t_start), bytes * 8.0 * 30 / n / 1e3,
+			t_enc / n, isp_n_3a,
+			isp_n_3a ? isp_t_3a / isp_n_3a : 0);
+	else if (n > 0)
 		fprintf(stderr, "%d frames in %.1f s: %.1f fps, %.0f kbit/s at "
 			"30 fps. Per frame: input %.1f ms, convert %.1f ms, "
 			"encode %.1f ms\n", n, (t1 - t_start) / 1e3,
 			n * 1e3 / (t1 - t_start), bytes * 8.0 * 30 / n / 1e3,
 			t_cap / n, t_conv / n, t_enc / n);
+	/* System time includes the kernel's cache syncs of the camera buffers */
+	if (n > 0)
+		fprintf(stderr, "CPU per frame: user %.2f ms, system %.2f ms\n",
+			((ru1.ru_utime.tv_sec - ru0.ru_utime.tv_sec) * 1e3 +
+			 (ru1.ru_utime.tv_usec - ru0.ru_utime.tv_usec) / 1e3) / n,
+			((ru1.ru_stime.tv_sec - ru0.ru_stime.tv_sec) * 1e3 +
+			 (ru1.ru_stime.tv_usec - ru0.ru_stime.tv_usec) / 1e3) / n);
 
 	if (cfd >= 0)
 		stream(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, 0);

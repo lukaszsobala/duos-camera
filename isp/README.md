@@ -98,15 +98,17 @@ kernel. Check `uname -r` first: `7.2.15-edge-sophgo-sg200x-riscv64` or
 
    Expected: 30 fps, and in the lines every 30 frames, the luminance near
    0.18 and the ISP gains settling within a second. The CPU stays almost
-   idle (`top`). Then try `ISP=1 ./j1-rtsp.sh` and play
-   `rtsp://<board>:8554/`.
+   idle (`top`). Then run `ISP=1 ./j1-h264.sh 300 -K` (no cache hints)
+   and compare the last line, `CPU per frame`. Then try
+   `ISP=1 ./j1-rtsp.sh` and play `rtsp://<board>:8554/`.
 
 ## Report
 
 - The output of steps 2, 3 and 4, with the full status lines. The line
   `csc after reset` gives the matrix format, which is not known yet.
 - `bars.png` and one frame of `cam.yuv` as PNG.
-- Step 7: the `cam2h264` output, and a few seconds of `out.h264`.
+- Step 7: the `cam2h264` output with and without `-K`, and a few seconds
+  of `out.h264`.
 - On a stall or a hang: `dmesg | grep -i cv1800` and
   `cat /sys/kernel/debug/a000000.video-input/status`.
 

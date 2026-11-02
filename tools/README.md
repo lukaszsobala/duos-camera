@@ -121,12 +121,18 @@ With a `cv1800-vi` that has the ISP path (see [../isp/README.md](../isp/README.m
 
 `cam2h264` sees the NV12 format of that node and switches to ISP mode. The
 encoder reads the camera buffers directly: no conversion and no copy on the
-CPU. Every 4th frame, `cam2h264` samples every 8th pixel. Auto exposure sets
+CPU. Every 4th frame (the frames in camera buffer 0), `cam2h264` samples
+every 16th pixel, while the encoder reads the same frame. Auto exposure sets
 the sensor for a mean luminance of 18%. White balance is gray world on the
 ISP's red and blue gains. `-B` sets the ISP black level (default 252, the
 GC2083's). Every 30 frames it prints the luminance, the clipped share, the
 ISP gains, the exposure and the gain. `-d` (detection) does not work in ISP
 mode.
+
+The CPU reads only buffer 0, so the other buffers skip the kernel's cache
+invalidate at each frame, and no buffer gets a cache clean. Each skipped
+sync is a pass over 3 MB. At the end, `cam2h264` prints the statistics time
+and the CPU time per frame. `-K` turns the cache hints off, for comparison.
 
 Object detection on the TPU: `-d model.cvimodel` draws boxes and labels
 into the picture, also through `j1-rtsp.sh` and `j1-http.sh`. It needs a

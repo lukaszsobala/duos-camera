@@ -113,9 +113,7 @@ int main(int argc, char **argv)
 			render(f, light, illum, hist[k][0], hist[k][1], hist[k][2], hist[k][3]);
 		}
 		if (n % 4 == 0) {
-			yuv_measure(f, W, H, W, 8, &st);
-			ae_step(ISP_AE_TARGET / (st.lum > 1e-3 ? st.lum : 1e-3), st.clipped, 0);
-			isp_awb(3, &st);
+			isp_3a(3, f, W, H, W, &st);
 			if (n % 4 == 0)
 				printf("frame %2d: lum %.3f clip %4.1f%%  mean R %.3f G %.3f B %.3f  exp %4d gain %5.2fx  WB R %.2f B %.2f\n",
 				       n, st.lum, st.clipped * 100, st.r, st.g, st.b, sim_exp, sim_gain / 64.0, isp_r, isp_b);
