@@ -117,6 +117,7 @@ static int awb_done;
 #define ISP_AE_TARGET	0.18		/* mean linear luminance */
 #define ISP_CID_BLACK_LEVEL	(V4L2_CID_USER_BASE | 0x1000)
 #define ISP_STEP	16		/* statistics from every 16th pixel */
+#define ISP_AE_HI	240		/* the brightest 2% stay below this */
 static float srgb_lin[256];		/* sRGB-encoded 8-bit value, linear */
 static double isp_r = 1.6, isp_b = 1.6;	/* ISP white balance gains */
 
@@ -125,6 +126,7 @@ struct yuv_stats {
 	double lum;		/* mean linear luminance of all samples */
 	double clipped;		/* share of samples with a clipped channel */
 	int nwb;		/* white balance samples */
+	int hi;			/* brightest channel of the brightest 2%, 0-255 */
 };
 
 /* Auto exposure through the sensor subdev controls */
@@ -518,7 +520,7 @@ static void yuv_measure(const uint8_t *f, int w, int h, int bpl, int step,
 {
 	const uint8_t *uvp = f + (size_t)bpl * h;
 	double sr = 0, sg = 0, sb = 0, sl = 0;
-	int x, y, n = 0, nc = 0, nwb = 0;
+	int x, y, n = 0, nc = 0, nwb = 0, hist[256] = { 0 };
 
 	for (y = 0; y < h; y += step)
 		for (x = 0; x < w; x += step) {
@@ -528,10 +530,12 @@ static void yuv_measure(const uint8_t *f, int w, int h, int bpl, int step,
 			int r = clamp255((yy + 409 * v + 128) >> 8);
 			int g = clamp255((yy - 100 * u - 208 * v + 128) >> 8);
 			int b = clamp255((yy + 516 * u + 128) >> 8);
+			int m = r > g ? (r > b ? r : b) : (g > b ? g : b);
 			double lr, lg, lb;
 
 			n++;
-			if (r >= 250 || g >= 250 || b >= 250) {
+			hist[m]++;
+			if (m >= 250) {
 				nc++;
 				sl += 1;
 				continue;
@@ -553,6 +557,32 @@ static void yuv_measure(const uint8_t *f, int w, int h, int bpl, int step,
 	st->r = nwb ? sr / nwb : 0;
 	st->g = nwb ? sg / nwb : 0;
 	st->b = nwb ? sb / nwb : 0;
+	for (x = 255, y = 0; x > 0 && (y += hist[x]) < n / 50; x--)
+		;
+	st->hi = x;
+}
+
+/*
+ * Auto exposure in ISP mode: the mean luminance goes to the target, but
+ * the brightest 2% of the samples must not clip. A lamp or a window in the
+ * picture may pull the mean down to half the target, no further. The
+ * highlight limit is continuous: an on/off limit at 2% clipped samples
+ * made the loop cycle between two exposures.
+ */
+static void isp_ae(const struct yuv_stats *st)
+{
+	double lum = st->lum > 1e-3 ? st->lum : 1e-3;
+	double ratio = ISP_AE_TARGET / lum, hi;
+
+	if (st->hi >= 250)
+		hi = 0.85;	/* clipped: how far over is not known */
+	else
+		hi = srgb_lin[ISP_AE_HI] / srgb_lin[st->hi > 8 ? st->hi : 8];
+	if (ratio > hi)
+		ratio = hi;
+	if (ratio < 0.5 * ISP_AE_TARGET / lum)
+		ratio = 0.5 * ISP_AE_TARGET / lum;
+	ae_step(ratio, 0, 0);
 }
 
 /* Both gains in one call: the ISP takes them for the same frame */
@@ -723,8 +753,7 @@ static void isp_3a(int fd, const uint8_t *f, int w, int h, int bpl,
 
 	yuv_measure(f, w, h, bpl, ISP_STEP, st);
 	if (ae.fd >= 0)
-		ae_step(ISP_AE_TARGET / (st->lum > 1e-3 ? st->lum : 1e-3),
-			st->clipped, 0);
+		isp_ae(st);
 	isp_awb(fd, st);
 	isp_t_3a += now_ms() - t0;
 	isp_n_3a++;
@@ -802,9 +831,9 @@ static int isp_loop(int cfd, int efd, int ofd, const struct buf *cam,
 
 		if (n % 30 == 0)
 			fprintf(stderr, "frame %d: %zu bytes, luminance %.3f, "
-				"clipped %.1f%%, ISP WB R %.2f B %.2f, exposure "
-				"%d lines, gain %.2fx\n", n, used, st.lum,
-				st.clipped * 100, isp_r, isp_b, ae.exp,
+				"clipped %.1f%%, top 2%% %d, ISP WB R %.2f B %.2f, "
+				"exposure %d lines, gain %.2fx\n", n, used, st.lum,
+				st.clipped * 100, st.hi, isp_r, isp_b, ae.exp,
 				ae.fd >= 0 ? (double)ae.gain / ae.gain_min : 0);
 	}
 	return n;

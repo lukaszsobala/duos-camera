@@ -130,7 +130,9 @@ With a `cv1800-vi` that has the ISP path (see [../isp/README.md](../isp/README.m
 encoder reads the camera buffers directly: no conversion and no copy on the
 CPU. Every 4th frame (the frames in camera buffer 0), `cam2h264` samples
 every 16th pixel, while the encoder reads the same frame. Auto exposure sets
-the sensor for a mean luminance of 18%. White balance is gray world on the
+the sensor for a mean luminance of 18%, but keeps the brightest 2% of the
+picture below clipping. A lamp or a window can pull the mean down to 9%, no
+further. White balance is gray world on the
 ISP's red and blue gains. `-B` sets the ISP black level (default 252, the
 GC2083's). Every 30 frames it prints the luminance, the clipped share, the
 ISP gains, the exposure and the gain. `-d` (detection) does not work in ISP

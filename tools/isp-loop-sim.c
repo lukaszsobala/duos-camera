@@ -7,6 +7,10 @@
  *
  *   cc -O2 -o isp-loop-sim isp-loop-sim.c -lm
  *   ./isp-loop-sim [light, default 0.2] [delay in frames, default 3]
+ *                  [lamp area in %, default 0]
+ *
+ * A lamp area adds patches 20 times brighter than white paper: a backlit
+ * scene.
  */
 #define ioctl sim_ioctl
 #define main cam_main
@@ -93,6 +97,7 @@ int main(int argc, char **argv)
 	unsigned int seed = 1;
 	static int hist[8][4];
 	int DELAY = argc > 2 ? atoi(argv[2]) : 3;
+	double lamp = argc > 3 ? atof(argv[3]) / 100 : 0;
 
 	for (y = 0; y < H / 20; y++)
 		for (x = 0; x < W / 20; x++)
@@ -100,6 +105,10 @@ int main(int argc, char **argv)
 				seed = seed * 1103515245 + 12345;
 				refl[c][y][x] = 0.05 + 0.6 * ((seed >> 16) & 0x7fff) / 32768.0;
 			}
+	/* The lamp: whole rows of patches from the top, then a part row */
+	for (n = 0; n < (int)(lamp * (H / 20) * (W / 20) + 0.5); n++)
+		for (c = 0; c < 3; c++)
+			refl[c][n / (W / 20)][n % (W / 20)] = 20;
 	ae.fd = 3; ae.exp_min = 1; ae.exp_max = 1120; ae.gain_min = 64;
 	ae.gain_max = 64 * 32; ae.exp = sim_exp; ae.gain = sim_gain; ae.flicker = 0;
 	expo = 1;
@@ -115,8 +124,8 @@ int main(int argc, char **argv)
 		if (n % 4 == 0) {
 			isp_3a(3, f, W, H, W, &st);
 			if (n % 4 == 0)
-				printf("frame %2d: lum %.3f clip %4.1f%%  mean R %.3f G %.3f B %.3f  exp %4d gain %5.2fx  WB R %.2f B %.2f\n",
-				       n, st.lum, st.clipped * 100, st.r, st.g, st.b, sim_exp, sim_gain / 64.0, isp_r, isp_b);
+				printf("frame %2d: lum %.3f clip %4.1f%% hi %3d  mean R %.3f G %.3f B %.3f  exp %4d gain %5.2fx  WB R %.2f B %.2f\n",
+				       n, st.lum, st.clipped * 100, st.hi, st.r, st.g, st.b, sim_exp, sim_gain / 64.0, isp_r, isp_b);
 		}
 	}
 	printf("ideal WB for this scene: R %.2f B %.2f (from the illuminant alone)\n", 1 / illum[0], 1 / illum[2]);
