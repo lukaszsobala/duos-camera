@@ -3,7 +3,8 @@
 # Build and install the camera tools on the board:
 #
 #   make              build cam2h264, h264-rtsp and mjpeg-http
-#   make install      copy them and the j1-*.sh scripts to $(PREFIX)/bin
+#   make install      copy them and the j1-*.sh and j2-*.sh scripts to
+#                     $(PREFIX)/bin
 #   make uninstall
 #
 # Run it on the board, not on a PC: a PC's riscv64 compiler can target a
@@ -21,7 +22,8 @@ THEAD := $(shell $(CC) -mcpu=thead-c906 -x c -c -o /dev/null /dev/null 2>/dev/nu
 CFLAGS ?= -O3 $(THEAD)
 
 PROGS   = cam2h264 h264-rtsp mjpeg-http
-SCRIPTS = j1-stream.sh j1-h264.sh j1-rtsp.sh j1-http.sh
+SCRIPTS = j1-stream.sh j1-h264.sh j1-rtsp.sh j1-http.sh \
+          j2-stream.sh j2-h264.sh j2-rtsp.sh j2-http.sh
 
 all: $(PROGS)
 

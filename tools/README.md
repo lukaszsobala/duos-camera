@@ -64,7 +64,7 @@ Build it on the board:
 
     apt install gcc libc6-dev make
     make                    # cam2h264, h264-rtsp, mjpeg-http
-    make install            # with them, the j1-*.sh scripts, to /usr/local/bin
+    make install            # with them, the j1-*.sh and j2-*.sh scripts, to /usr/local/bin
 
 `make` adds `-mcpu=thead-c906` by itself when the compiler knows it. As
 root, `make install` needs no sudo. As another user, run `sudo make install`
@@ -150,6 +150,24 @@ frames the ISP dropped for want of a free buffer. At the end, `cam2h264`
 prints the lost frames, the latency from the start of a frame to its
 encoded data, the statistics time and the CPU time per frame. `-K` turns
 the cache hints off, for comparison.
+
+### Cameras on J2: IMX708 and OV5647
+
+The `j2-*.sh` scripts do the same for the Raspberry Pi Camera Module 3
+(IMX708) or v1 (OV5647) on J2, always through the ISP, at 1920x1080 and 30
+fps. They need `overlays=camera-j2-imx708` (or `camera-j2-ov5647`) and
+`video-codec`.
+
+    j2-h264.sh 300                       # H.264 to out.h264
+    j2-rtsp.sh                           # the same over RTSP
+    j2-http.sh                           # motion JPEG over HTTP
+    j2-stream.sh 0 8                     # 8 NV12 frames to /root/cap.yuv
+
+`j2-stream.sh` flips a sensor that the overlay declares as rotated by 180
+degrees (the Camera Module 3), so the picture is upright. It sets the frame
+rate with the sensor's vertical blanking (`FPS`, default 30). `cam2h264`
+finds the sensor, takes its black level (IMX708 256, OV5647 64), and knows
+the IMX708's non-linear gain control (1024 / (1024 - value), 1x to 16x).
 
 Object detection on the TPU: `-d model.cvimodel` draws boxes and labels
 into the picture, also through `j1-rtsp.sh` and `j1-http.sh`. It needs a

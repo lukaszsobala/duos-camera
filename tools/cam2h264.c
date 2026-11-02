@@ -2,7 +2,8 @@
 /*
  * cam2h264: GC2083 raw frames -> half-size NV12 -> CODA980 H.264, or
  * -> WAVE420L H.265 with -x, or -> JPU motion JPEG with -j. From the ISP
- * node, full-size NV12 frames go to the encoder as they are.
+ * node, full-size NV12 frames go to the encoder as they are: from the
+ * GC2083, the IMX708 or the OV5647.
  *
  *   cam2h264 -c /dev/videoN [options]   from the camera (cv1800-vi-raw,
  *                                       or cv1800-vi-yuv: ISP mode)
@@ -22,8 +23,8 @@
  *   -s F     colour saturation (default 1.5). ISP mode: through the ISP's
  *            colour matrix (default 2)
  *   -y FILE  write NV12 frames to FILE, without the encoder
- *   -S DEV   sensor subdev for auto exposure (default: the subdev named
- *            gc2083...)
+ *   -S DEV   sensor subdev for auto exposure (default: the gc2083, imx708 or
+ *            ov5647 subdev)
  *   -M       no auto exposure: keep the sensor exposure and gain
  *   -F HZ    mains frequency, 50 or 60: exposure times in steps of the
  *            light flicker period, against banding. 0 = off (default 50)
@@ -33,8 +34,8 @@
  *   -t T     detection score threshold, 0-1 (default 0.5)
  *   -L LIST  detection class names, comma-separated (default: COCO for
  *            80-class models)
- *   -B N     ISP mode: black level in 12-bit units (default 252, the
- *            GC2083's)
+ *   -B N     ISP mode: black level in 12-bit units (default: GC2083 252,
+ *            IMX708 256, OV5647 64)
  *   -K       ISP mode: no cache hints on the camera buffers
  *   -Y N     ISP mode: luma noise reduction strength at 20x gain, scaled
  *            with the square root of the gain, off below 2x. 0 = off
@@ -102,6 +103,7 @@
 #define OUT_W	(RAW_W / 2)
 #define OUT_H	(RAW_H / 2)
 #define BLACK	16		/* 64 in 10 bits, in the top 8 bits */
+#define ARRAY_SIZE(a)	(sizeof(a) / sizeof((a)[0]))
 #define NBUF_CAM 4
 #define NBUF_ISP 8		/* ISP mode: room for frames in the encoder */
 #define NBUF_ENC_OUT 2
@@ -152,9 +154,58 @@ struct yuv_stats {
 static struct {
 	int fd;				/* < 0: no auto exposure */
 	int exp, exp_min, exp_max;	/* exposure, in lines */
-	int gain, gain_min, gain_max;	/* analogue gain; gain_min = 1x */
+	int gain, gain_min, gain_max;	/* analogue gain control values */
+	int imx708;			/* gain = 1024 / (1024 - value) */
 	int flicker;			/* lines per flicker period, 0: off */
 } ae = { .fd = -1 };
+
+/*
+ * The analogue gain of a control value, in x. The IMX708 control is not
+ * linear. For the other sensors, the lowest value is 1x.
+ */
+static double ae_gain_x(int v)
+{
+	if (ae.imx708)
+		return 1024.0 / (1024 - v);
+	return (double)v / ae.gain_min;
+}
+
+/* The control value for a gain in x, rounded down */
+static int ae_gain_val(double g)
+{
+	double v = ae.imx708 ? 1024 - 1024 / g : g * ae.gain_min;
+
+	return (int)(v + 1e-6);
+}
+
+/* The sensors cam2h264 knows: subdev name, ISP black level in 12-bit units */
+static const struct {
+	const char *name;
+	int black;
+} sensors[] = {
+	{ "gc2083", 252 },	/* the vendor's gc2083_cmos_param.h */
+	{ "imx708", 256 },	/* 64 in 10 bits */
+	{ "ov5647", 64 },	/* 16 in 10 bits */
+};
+
+/* The entity name of a subdev node, from sysfs. Empty if not known. */
+static void subdev_name(const char *dev, char *name, size_t len)
+{
+	const char *base = strrchr(dev, '/');
+	char fn[300];
+	FILE *f;
+
+	name[0] = 0;
+	snprintf(fn, sizeof(fn), "/sys/class/video4linux/%.64s/name",
+		 base ? base + 1 : dev);
+	f = fopen(fn, "r");
+	if (!f)
+		return;
+	if (!fgets(name, len, f))
+		name[0] = 0;
+	fclose(f);
+	name[strcspn(name, "\n")] = 0;
+}
 
 static void on_sigint(int sig)
 {
@@ -382,7 +433,8 @@ static int ctrl_range(int fd, uint32_t id, int *min, int *max)
  * Open the sensor subdev for auto exposure. max_gain is the highest
  * analogue gain, in x. hz is the mains frequency, 0 for no flicker steps.
  */
-static void ae_open(const char *dev, int max_gain, int hz)
+static void ae_open(const char *dev, const char *name, int max_gain, int hz,
+		    int width)
 {
 	int64_t rate, hblank;
 
@@ -403,21 +455,31 @@ static void ae_open(const char *dev, int max_gain, int hz)
 		ae.fd = -1;
 		return;
 	}
-	if (max_gain > 0 && (int64_t)ae.gain_min * max_gain < ae.gain_max)
-		ae.gain_max = ae.gain_min * max_gain;
+	ae.imx708 = !strncmp(name, "imx708", 6);
+	if (!ae.imx708 && ae.gain_min <= 0) {
+		fprintf(stderr, "%s: gain control from %d: no auto exposure\n",
+			dev, ae.gain_min);
+		close(ae.fd);
+		ae.fd = -1;
+		return;
+	}
+	if (max_gain > 0 &&
+	    ae_gain_x(ae.gain_max) > ae_gain_x(ae.gain_min) * max_gain)
+		ae.gain_max = ae_gain_val(ae_gain_x(ae.gain_min) * max_gain);
 
 	/* Flicker period in lines: a line is (width + hblank) pixels */
 	rate = get_ctrl(ae.fd, V4L2_CID_PIXEL_RATE);
 	hblank = get_ctrl(ae.fd, V4L2_CID_HBLANK);
 	if (hz > 0 && rate > 0 && hblank >= 0)
-		ae.flicker = (int)(rate / (2.0 * hz) / (RAW_W + hblank) + 0.5);
+		ae.flicker = (int)(rate / (2.0 * hz) / (width + hblank) + 0.5);
 	if (ae.flicker > ae.exp_max)
 		ae.flicker = 0;
 
 	expo = 1;
-	fprintf(stderr, "auto exposure: %s, exposure %d-%d lines, gain up to "
-		"%.0fx, flicker step %d lines\n", dev, ae.exp_min, ae.exp_max,
-		(double)ae.gain_max / ae.gain_min, ae.flicker);
+	fprintf(stderr, "auto exposure: %s (%s), exposure %d-%d lines, gain "
+		"%.2f-%.1fx, flicker step %d lines\n", dev, name, ae.exp_min,
+		ae.exp_max, ae_gain_x(ae.gain_min), ae_gain_x(ae.gain_max),
+		ae.flicker);
 }
 
 /*
@@ -452,7 +514,8 @@ static double ae_measure(const uint8_t *raw, int stride, double *clipped)
  */
 static void ae_step(double ratio, double clipped, int digital)
 {
-	double want, e, g, d;
+	double want, e, g, d, gmin, gmax;
+	int gv;
 	struct v4l2_ext_control c[2] = {
 		{ .id = V4L2_CID_EXPOSURE }, { .id = V4L2_CID_ANALOGUE_GAIN },
 	};
@@ -468,10 +531,13 @@ static void ae_step(double ratio, double clipped, int digital)
 	/* Most of the way, at most 4x per step: no overshoot */
 	ratio = pow(ratio, 0.7);
 	ratio = ratio < 0.25 ? 0.25 : ratio > 4 ? 4 : ratio;
-	want = (double)ae.exp * ae.gain * expo * ratio;
+	/* In lines times x: the light the sensor collects, with the gains */
+	gmin = ae_gain_x(ae.gain_min);
+	gmax = ae_gain_x(ae.gain_max);
+	want = ae.exp * ae_gain_x(ae.gain) * expo * ratio;
 
 	/* Exposure time first, in whole flicker periods when it is long */
-	e = want / ae.gain_min;
+	e = want / gmin;
 	if (ae.flicker && e >= ae.flicker)
 		e = (int)(e / ae.flicker) * ae.flicker;
 	if (e > ae.exp_max)
@@ -481,19 +547,21 @@ static void ae_step(double ratio, double clipped, int digital)
 		e = ae.exp_min;
 	/* Then analogue gain, then software gain */
 	g = want / e;
-	g = g < ae.gain_min ? ae.gain_min : g > ae.gain_max ? ae.gain_max : g;
+	g = g < gmin ? gmin : g > gmax ? gmax : g;
 	d = want / (e * g);
 	d = d < 1 ? 1 : d > AE_DIGITAL_MAX ? AE_DIGITAL_MAX : d;
 
-	if ((int)e != ae.exp || (int)g != ae.gain) {
+	gv = ae_gain_val(g);
+	gv = gv < ae.gain_min ? ae.gain_min : gv > ae.gain_max ? ae.gain_max : gv;
+	if ((int)e != ae.exp || gv != ae.gain) {
 		c[0].value = (int)e;
-		c[1].value = (int)g;
+		c[1].value = gv;
 		if (ioctl(ae.fd, VIDIOC_S_EXT_CTRLS, &cs) < 0) {
 			perror("auto exposure: VIDIOC_S_EXT_CTRLS");
 			return;
 		}
 		ae.exp = (int)e;
-		ae.gain = (int)g;
+		ae.gain = gv;
 	}
 	if (digital && d != expo) {
 		expo = d;
@@ -835,7 +903,7 @@ static void isp_nr_update(int fd)
 	struct v4l2_ext_controls cs = {
 		.which = V4L2_CTRL_WHICH_CUR_VAL, .count = 1, .controls = &c,
 	};
-	double g = (double)ae.gain / ae.gain_min;
+	double g = ae_gain_x(ae.gain);
 	long v = g < 2 ? 0 : lround(isp_nr20 * sqrt(g / 20));
 
 	c.value = v > 255 ? 255 : v;
@@ -964,7 +1032,7 @@ static int isp_loop(int cfd, int efd, int ofd, const struct buf *cam,
 					"gain %.2fx, NR %d\n", done, used, *lost,
 					st.lum, st.clipped * 100, st.hi, isp_r, isp_b,
 					ae.exp, ae.fd >= 0 ?
-					(double)ae.gain / ae.gain_min : 0,
+					ae_gain_x(ae.gain) : 0,
 					isp_nr > 0 ? isp_nr : 0);
 			done++;
 		}
@@ -1127,8 +1195,8 @@ int main(int argc, char **argv)
 	struct det_box box[DET_MAX];
 	int nbox = 0;
 #endif
-	char enc_dev[300] = "", sensor_path[300];
-	int manual = 0, mains_hz = 50, max_gain = 32, black = 252;
+	char enc_dev[300] = "", sensor_path[300], sensor_name[64] = "";
+	int manual = 0, mains_hz = 50, max_gain = 32, black = -1;
 	int isp = 0, out_w = OUT_W, out_h = OUT_H, out_bpl = OUT_W;
 	int dmafd[NBUF_ISP], ncam = NBUF_CAM, lost = 0;
 	int frames = 300, qp = 30, gop = 30, sat = -1, jpeg = 0, quality = 85;
@@ -1253,14 +1321,24 @@ int main(int argc, char **argv)
 		}
 		stride = f.fmt.pix.bytesperline;
 
-		if (!manual && !sensor_dev &&
-		    find_node("v4l-subdev", "gc2083", sensor_path,
-			      sizeof(sensor_path)))
-			sensor_dev = sensor_path;
+		for (n = 0; !sensor_dev && n < (int)ARRAY_SIZE(sensors); n++)
+			if (find_node("v4l-subdev", sensors[n].name, sensor_path,
+				      sizeof(sensor_path)))
+				sensor_dev = sensor_path;
+		if (sensor_dev)
+			subdev_name(sensor_dev, sensor_name, sizeof(sensor_name));
+		for (n = 0; black < 0 && n < (int)ARRAY_SIZE(sensors); n++)
+			if (!strncmp(sensor_name, sensors[n].name,
+				     strlen(sensors[n].name)))
+				black = sensors[n].black;
+		if (isp && black < 0)
+			fprintf(stderr, "sensor \"%s\" not known: ISP black "
+				"level 0 (-B sets it)\n", sensor_name);
 		if (!manual && sensor_dev)
-			ae_open(sensor_dev, max_gain, mains_hz);
+			ae_open(sensor_dev, sensor_name, max_gain, mains_hz,
+				isp ? out_w : RAW_W);
 		else if (!manual)
-			fprintf(stderr, "no gc2083 subdev: no auto exposure\n");
+			fprintf(stderr, "no sensor subdev: no auto exposure\n");
 	} else {
 		ifd = open(in_file, O_RDONLY);
 		if (ifd < 0)
@@ -1411,7 +1489,8 @@ int main(int argc, char **argv)
 		if (isp) {
 			double s = sat >= 0 ? sat / 256.0 : ISP_SAT;
 
-			set_ctrl(cfd, ISP_CID_BLACK_LEVEL, black, "ISP black level");
+			set_ctrl(cfd, ISP_CID_BLACK_LEVEL, black > 0 ? black : 0,
+				 "ISP black level");
 			set_ctrl(cfd, V4L2_CID_GAMMA, 1, "ISP gamma");
 			if (!isp_set_ccm(cfd, s))
 				isp_sat = s;
@@ -1529,7 +1608,7 @@ int main(int argc, char **argv)
 			fprintf(stderr, "frame %d: %zu bytes, WB R %.2f B %.2f, "
 				"exposure %d lines, gain %.2fx, digital %.2fx\n",
 				n, used, gain_r, gain_b, ae.exp,
-				(double)ae.gain / ae.gain_min, expo);
+				ae_gain_x(ae.gain), expo);
 		else if (n % 30 == 0)
 			fprintf(stderr, "frame %d: %zu bytes, WB R %.2f B %.2f, "
 				"digital gain %.2fx\n", n, used, gain_r, gain_b,
