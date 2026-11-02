@@ -3,7 +3,7 @@
 Working files for the CAM-GC2083 on the J1 connector of the Milk-V Duo S,
 under Armbian.
 
-## Current state (2026-10-19)
+## Current state (2026-11-02)
 
 - **The camera works.** The GC2083 gives correct 1920x1080 frames at 29.7 fps
   on J1, through the SG2000 receiver and capture drivers (`cv1800-csi2`,
@@ -30,6 +30,11 @@ under Armbian.
   model on the TPU and draws the boxes into the H.264 or MJPEG stream. The
   driver is in Armbian main; the runtime and the programs are in
   [tpu/](tpu/README.md). Not run on hardware yet.
+- **Hardware ISP: ready to test.** The `cv1800-vi` driver gets a YUV
+  capture node that gives NV21/NV12 frames from the SoC's ISP: black level,
+  white balance, demosaic, gamma. Branch `cv1800-isp` of the fork
+  github.com/lukaszsobala/sg200x-camera-dkms. Not run on hardware yet. See
+  [isp/](isp/README.md).
 - **libcamera works** with the software ISP, at about 5 fps. The startup
   auto exposure overshoots. See [libcamera/README.md](libcamera/README.md).
 - **H.265 encoder: parked.** Our `wave420l` driver boots the WAVE420L,
@@ -47,6 +52,7 @@ under Armbian.
 | Encode H.264 or MJPEG, live view (HTTP) | [h264-test.md](h264-test.md), [tools/README.md](tools/README.md) |
 | H.265 encoder (parked)                 | [h265/README.md](h265/README.md)       |
 | Object detection on the TPU            | [tpu/README.md](tpu/README.md)         |
+| YUV frames from the hardware ISP       | [isp/README.md](isp/README.md)         |
 | What the driver does and assumes       | "The sensor driver" below              |
 
 ## Files
@@ -81,6 +87,8 @@ Current:
 - `h265/`: the parked H.265 work: patches, runbook, results, tools.
 - `tpu/`: object detection on the TPU: the runtime build, the detector,
   a model inspector.
+- `isp/`: the hardware ISP path of `cv1800-vi`: runbook and status. The
+  driver itself lives in the sg200x-camera-dkms fork.
 - `Makefile`: builds `gc2083.ko` out of tree.
 
 `led/` is not camera work. It turns the blue user LED off. See

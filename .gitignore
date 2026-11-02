@@ -19,3 +19,4 @@ libcamera/libcamera-riscv64.tar.gz
 tpu/work/
 tpu/cviruntime-*.tar.gz
 /tpu/det-image
+isp/build/
