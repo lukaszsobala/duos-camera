@@ -29,14 +29,18 @@ stage writes 4:2:0 to the capture buffer. The vendor calls this the offline
 back end mode. The register sequence follows the vendor's GPL kernel driver,
 `<duo-buildroot-sdk-v2>/osdrv/interdrv/vi/chip/cv181x/`.
 
-Active: black level, white balance gains, demosaic, colour matrix, sRGB
-gamma, BT.601 RGB to YUV matrix. Off: lens shading, defect pixels, noise
-reduction, sharpening, tone mapping, all statistics.
+Active: black level, Bayer noise reduction, white balance gains, demosaic,
+colour matrix, sRGB gamma, BT.601 RGB to YUV matrix, luma and chroma noise
+reduction. The noise reduction stages are off until a strength is set. Off:
+lens shading, defect pixels, temporal noise reduction, sharpening, tone
+mapping, all statistics.
 
 Controls on `cv1800-vi-yuv`: `red_balance`, `blue_balance` (1024 = 1.0),
 `black_level` (12-bit units; GC2083: 252, from the vendor's
 `gc2083_cmos_param.h`), `gamma` (1 = sRGB, 0 = linear),
-`colour_correction_matrix` (3x3, rows R G B, 1024 = 1.0, default identity).
+`colour_correction_matrix` (3x3, rows R G B, 1024 = 1.0, default identity),
+`noise_reduction_raw`, `noise_reduction_luma`, `noise_reduction_chroma`
+(0-255, 0 = off, the default). All take effect at the next frame.
 `cam2h264` loads a saturation matrix (`-s`, default 2, chosen on the board
 2026-11-02 over 1.5). The vendor keeps
 its GC2083 matrix in binary tuning files only, so a calibrated matrix needs
@@ -118,6 +122,22 @@ The steps use the tools of this repository, installed with `make install`
    On the PC:
 
        ffplay -rtsp_transport tcp -fflags nobuffer rtsp://<board>:8554/
+
+8. Noise reduction, in dim light (gain 16x or more in the progress lines).
+   Keep the stream of step 7 running. In a second shell, change one
+   strength at a time (0-255, 0 = off) and watch the picture and the frame
+   sizes in the progress lines:
+
+       V=$(media-ctl -e cv1800-vi-yuv)
+       v4l2-ctl -d $V -c noise_reduction_raw=255
+       v4l2-ctl -d $V -c noise_reduction_luma=64
+       v4l2-ctl -d $V -c noise_reduction_chroma=255
+       v4l2-ctl -d $V -l | grep noise         # the values in use
+
+   Expected: smaller frames and a calmer picture, with edges kept. Too much
+   makes the picture smeared. Note the strengths that look best at high
+   gain, and whether any stage changes nothing or breaks the picture. The
+   values come from the vendor's defaults; their effect is not known yet.
 
 ## Report
 
