@@ -42,9 +42,8 @@ one 0920 serves both patch directories.
 
        scp <duo-buildroot-sdk-v2>/device/generic/rootfs_overlay/common/usr/share/fw_vcodec/coda980.bin root@<board>:/lib/firmware/v4l-coda980-sg2000.bin
 
-   md5 `02d773cb7b1ef926c7f1e30e5b7918f8`. It has no license file. Kernels
-   from 2026-10-19 on (build commit 77df6a8f) ask only for this name.
-   Older kernels ask for `coda980.bin`.
+   md5 `02d773cb7b1ef926c7f1e30e5b7918f8`. It has no license file. The
+   driver asks only for this name.
 3. In `/boot/armbianEnv.txt`:
 
        overlays=camera-j1-gc2083 video-codec
