@@ -47,10 +47,11 @@
  * software gain alone sets the exposure.
  *
  * ISP mode: the camera node gives NV12 (or NV21: the program asks for NV12)
- * from the hardware ISP, at the sensor size. The encoder reads the camera
+ * from the hardware ISP, at the sensor size: BT.601 limited range for
+ * H.264, full range for JPEG. The encoder reads the camera
  * buffers through DMABUF, without a copy. The frames in camera buffer 0
  * (every 4th frame) give the statistics, from every 16th pixel: linear RGB
- * through the inverse BT.601 limited-range matrix and the sRGB curve. They
+ * through the inverse BT.601 matrix and the sRGB curve. They
  * are computed while the encoder reads the frame. The other buffers skip
  * the kernel's cache invalidate, and no buffer needs a cache clean: the CPU
  * never writes them. Auto exposure sets the sensor for a mean luminance of
@@ -120,6 +121,7 @@ static int awb_done;
 #define ISP_AE_HI	240		/* the brightest 2% stay below this */
 static float srgb_lin[256];		/* sRGB-encoded 8-bit value, linear */
 static double isp_r = 1.6, isp_b = 1.6;	/* ISP white balance gains */
+static int isp_full;			/* full-range YUV, else limited */
 
 struct yuv_stats {
 	double r, g, b;		/* linear means of the white balance samples */
@@ -511,7 +513,8 @@ static int clamp255(int v)
 }
 
 /*
- * Statistics of an NV12 frame from every step-th pixel in each direction.
+ * Statistics of an NV12 frame from every step-th pixel in each direction,
+ * BT.601 limited range, or full range if isp_full.
  * Samples with a clipped channel count as white for the luminance and do
  * not count for white balance; nor do dark ones, which are mostly noise.
  */
@@ -519,17 +522,21 @@ static void yuv_measure(const uint8_t *f, int w, int h, int bpl, int step,
 			struct yuv_stats *st)
 {
 	const uint8_t *uvp = f + (size_t)bpl * h;
+	/* Y offset and gain, then V to R, U and V to G, U to B, 256 = 1.0 */
+	const int k[6] = { isp_full ? 0 : 16, isp_full ? 256 : 298,
+			   isp_full ? 359 : 409, isp_full ? 88 : 100,
+			   isp_full ? 183 : 208, isp_full ? 454 : 516 };
 	double sr = 0, sg = 0, sb = 0, sl = 0;
 	int x, y, n = 0, nc = 0, nwb = 0, hist[256] = { 0 };
 
 	for (y = 0; y < h; y += step)
 		for (x = 0; x < w; x += step) {
 			const uint8_t *c = uvp + (size_t)(y / 2) * bpl + (x & ~1);
-			int yy = 298 * (f[(size_t)y * bpl + x] - 16);
+			int yy = k[1] * (f[(size_t)y * bpl + x] - k[0]);
 			int u = c[0] - 128, v = c[1] - 128;
-			int r = clamp255((yy + 409 * v + 128) >> 8);
-			int g = clamp255((yy - 100 * u - 208 * v + 128) >> 8);
-			int b = clamp255((yy + 516 * u + 128) >> 8);
+			int r = clamp255((yy + k[2] * v + 128) >> 8);
+			int g = clamp255((yy - k[3] * u - k[4] * v + 128) >> 8);
+			int b = clamp255((yy + k[5] * u + 128) >> 8);
 			int m = r > g ? (r > b ? r : b) : (g > b ? g : b);
 			double lr, lg, lb;
 
@@ -1061,7 +1068,21 @@ int main(int argc, char **argv)
 			/* The ISP node: full size, NV12 for the encoder */
 			isp = 1;
 			f.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
+			/* JPEG is full range; H.264 without VUI is limited */
+			f.fmt.pix.priv = V4L2_PIX_FMT_PRIV_MAGIC;
+			f.fmt.pix.flags = V4L2_PIX_FMT_FLAG_SET_CSC;
+			f.fmt.pix.colorspace = V4L2_COLORSPACE_DEFAULT;
+			f.fmt.pix.ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
+			f.fmt.pix.xfer_func = V4L2_XFER_FUNC_DEFAULT;
+			f.fmt.pix.quantization = jpeg ?
+				V4L2_QUANTIZATION_FULL_RANGE :
+				V4L2_QUANTIZATION_LIM_RANGE;
 			xioctl(cfd, VIDIOC_S_FMT, &f, "camera VIDIOC_S_FMT");
+			isp_full = f.fmt.pix.quantization ==
+				   V4L2_QUANTIZATION_FULL_RANGE;
+			if (jpeg && !isp_full)
+				fprintf(stderr, "warning: the ISP gives limited "
+					"range: the JPEG frames have low contrast\n");
 			out_w = f.fmt.pix.width;
 			out_h = f.fmt.pix.height;
 			out_bpl = f.fmt.pix.bytesperline;

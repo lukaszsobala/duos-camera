@@ -71,11 +71,14 @@ The steps use the tools of this repository, installed with `make install`
        GAIN=1024 ISP=1 OUT=/dev/shm/cam.yuv j1-stream.sh 0 8
 
 4. Convert on a PC. `j1-stream.sh` captures NV12, the format of the
-   encoder. The matrix at reset gives full-range BT.601 (2026-11-02):
+   encoder, in BT.601 limited range:
 
        scp root@<board>:/dev/shm/{bars,cam}.yuv .
-       ffmpeg -f rawvideo -pix_fmt nv12 -s 1920x1080 -i bars.yuv -vf scale=in_range=full -frames 1 bars.png
-       ffmpeg -f rawvideo -pix_fmt nv12 -s 1920x1080 -i cam.yuv -vf 'select=eq(n\,7),scale=in_range=full' -frames 1 cam.png
+       ffmpeg -f rawvideo -pix_fmt nv12 -s 1920x1080 -i bars.yuv -frames 1 bars.png
+       ffmpeg -f rawvideo -pix_fmt nv12 -s 1920x1080 -i cam.yuv -vf 'select=eq(n\,7)' -frames 1 cam.png
+
+   A driver from before the range fix gives full range: add
+   `scale=in_range=full` to the filters.
 
    Expected: vertical colour bars in `bars.png`, and a correct image with a
    colour cast in `cam.png`. If red and blue are swapped, stop here: the
@@ -122,13 +125,16 @@ The steps use the tools of this repository, installed with `make install`
 
 ## Not known yet
 
-- NV21 or NV12 as the hardware order (step 4).
-- The RGB to YUV matrix at reset (2026-11-02, from the status file):
-  full-range BT.601, rows Y, Cb, Cr, coefficients 1024 = 1.0, offsets
-  0/512/512 (10-bit units). The vendor's scaler code calls this "601
-  Limited": its labels are swapped. The driver still reports limited
-  range, and coda's H.264 SPS has no VUI to signal full range: the driver
-  needs a limited-range matrix for H.264 and full range for JPEG.
+- Done, 2026-11-02: NV12 as the driver labels it is correct (colour bars
+  in step 4). NV21 is not checked.
+- Done, 2026-11-02: the RGB to YUV matrix at reset is full-range BT.601,
+  rows Y, Cb, Cr, coefficients 1024 = 1.0, offsets 0/512/512 (10-bit
+  units). The vendor's scaler code calls this "601 Limited": its labels
+  are swapped. coda's H.264 SPS has no VUI to signal full range, so the
+  driver now gives limited range, and full range when the application
+  sets `V4L2_PIX_FMT_FLAG_SET_CSC` with `V4L2_QUANTIZATION_FULL_RANGE`
+  (cam2h264 does for JPEG). The status file shows `isp output limited
+  range` or `full range`. Not tested on the board yet.
 - Whether the output DMA accepts software-set strides. The vendor lets the
   hardware set them. The driver writes the same values the vendor
   computes, so for 1920 wide frames both give the same result.
