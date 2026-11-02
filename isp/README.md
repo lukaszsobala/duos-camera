@@ -12,9 +12,10 @@ hardware.
 - The same driver in `<linux-gc2083>`, branch `cv1800-isp` on v7.2-rc7:
   import commit, then the ISP commit. Build check there:
   `make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- M=drivers/media/platform/sophgo CONFIG_VIDEO_SOPHGO_CV1800_VI=m KBUILD_MODPOST_WARN=1 W=1 modules`.
-- Test modules for the 7.2.15 kernels of 2026-11-01 (built from the headers
-  packages in `<armbian-build>/output/debs/`): `build/cv1800-vi-7.2.15-riscv64.ko`,
-  `build/cv1800-vi-7.2.15-arm64.ko`. Not in git.
+- Test modules for 7.2.15 kernels without the ISP path (built from the
+  headers packages in `<armbian-build>/output/debs/`):
+  `build/cv1800-vi-7.2.15-riscv64.ko`, `build/cv1800-vi-7.2.15-arm64.ko`.
+  Not in git. Not needed with a kernel built from the `cv1800-isp` commit.
 
 ## What the driver does
 
@@ -37,86 +38,89 @@ Controls on `cv1800-vi-yuv`: `red_balance`, `blue_balance` (1024 = 1.0),
 
 ## Test
 
-Run on the board as root, with `overlays=camera-j1-gc2083` and the 7.2.15
-kernel. Check `uname -r` first: `7.2.15-edge-sophgo-sg200x-riscv64` or
-`-arm64`.
+Run on the board as root, with `overlays=camera-j1-gc2083 video-codec`.
+The steps use the tools of this repository, installed with `make install`
+(see [tools/README.md](../tools/README.md)):
 
-1. Copy the module of the running architecture and the capture script:
+    cd /root/duos-camera && git pull && make -C tools install
 
-       scp isp/build/cv1800-vi-7.2.15-riscv64.ko root@duos:/root/cv1800-vi.ko
-       scp <sg200x-camera-dkms>/tools/stream-yuv.sh root@duos:/root/
+1. Check that the kernel has the ISP path:
 
-2. Replace the module until the next reboot:
+       media-ctl -p | grep -A4 cv1800-vi-yuv
+       dmesg | grep -i 'ISP revision'
 
-       rmmod cv1800_vi && insmod /root/cv1800-vi.ko
-       dmesg | tail -5
-       media-ctl -p | grep -B1 -A4 'cv1800-vi-yuv'
+   Expected: an entity `cv1800-vi-yuv` and `ISP revision 0x3166`. Without
+   them, build the kernel with
+   `SG200X_CAMERA_REPO=https://github.com/lukaszsobala/sg200x-camera-dkms`
+   and `SG200X_CAMERA_REF=commit:094d89b6b8103a2ba732e25d4a9014b3f441878f`.
+   For a 7.2.15 kernel without the ISP path, the test modules in `build/`
+   work instead until the next reboot:
+   `rmmod cv1800_vi && insmod cv1800-vi-7.2.15-riscv64.ko`.
 
-   Expected: `ISP revision` in dmesg, an entity `cv1800-vi-yuv`, and three
-   pads on `cv1800-vi-bridge`. If `rmmod` says the module is in use, stop
-   the program that uses the camera.
+2. Colour bars from the bridge through the ISP. This needs no light:
 
-3. Colour bars from the bridge through the ISP. This needs no light:
+       BLACK=0 ISP=1 OUT=/root/bars.yuv j1-stream.sh 1 4
 
-       cd /root && PATTERN=1 OUT=bars.yuv ./stream-yuv.sh 1920 1080 4
+   Expected: in the status lines, `isp triggers` equal to `done` (or one
+   more), and `stalls 0`.
 
-   Expected: four frames, about 30 fps, and in the status lines
-   `isp triggers` equal to `done` with `stalls 0`. On a PC:
+3. The camera, with 16x sensor gain for indoor light:
 
-       ffmpeg -f rawvideo -pix_fmt nv21 -s 1920x1080 -i bars.yuv -frames 1 bars.png
+       GAIN=1024 ISP=1 OUT=/root/cam.yuv j1-stream.sh 0 8
 
-   Expected: vertical colour bars. If red and blue look swapped, the
-   hardware order is NV12, not NV21.
+4. Convert on a PC. `j1-stream.sh` captures NV12, the format of the
+   encoder:
 
-4. The camera, with the black level and 16x gain:
+       scp root@<board>:/root/{bars,cam}.yuv .
+       ffmpeg -f rawvideo -pix_fmt nv12 -s 1920x1080 -i bars.yuv -frames 1 bars.png
+       ffmpeg -f rawvideo -pix_fmt nv12 -s 1920x1080 -i cam.yuv -vf 'select=eq(n\,7)' -frames 1 cam.png
 
-       v4l2-ctl -d "$(media-ctl -e 'gc2083 3-0037')" -c analogue_gain=1024
-       BLACK=252 OUT=cam.yuv ./stream-yuv.sh 1920 1080 8
+   Expected: vertical colour bars in `bars.png`, and a correct image with a
+   colour cast in `cam.png`. If red and blue are swapped, stop here: the
+   chroma order is wrong, and the white balance of step 6 runs to its
+   limits. To remove the cast by hand, set the gains (1024 = 1.0) and
+   repeat step 3:
 
-   Convert the last frame on a PC (`-vf select=eq(n\,7)`). Expected: a
-   correct image with a colour cast. Try `RED=` and `BLUE=` values from 1024
-   to 2500 to remove the cast.
+       v4l2-ctl -d "$(media-ctl -e cv1800-vi-yuv)" -c red_balance=1800,blue_balance=2000
 
-5. NV12, the format the H.264 encoder takes:
+5. The raw node still works:
 
-       FMT=NV12 BLACK=252 OUT=cam12.yuv ./stream-yuv.sh 1920 1080 8
+       j1-stream.sh 0 8
 
-   Convert with `-pix_fmt nv12`. Expected: the same colours as step 4.
+6. H.264 at 1920x1080 with auto exposure and white balance, after step 4
+   works. This needs the encoder firmware as
+   `/lib/firmware/v4l-coda980-sg2000.bin` (see
+   [h264-test.md](../h264-test.md)). `dmesg | grep -i coda` must show
+   `Firmware version: 3.0.1`.
 
-6. The raw node still works: run `tools/j1-stream.sh` from this repository
-   as in [j1-test.md](../j1-test.md).
-
-7. H.264 at 1920x1080 with auto exposure and white balance, after steps 3
-   to 5 work. This needs `overlays=camera-j1-gc2083 video-codec` and the
-   encoder firmware as `/lib/firmware/v4l-coda980-sg2000.bin`: the 7.2.15
-   kernel asks only for that name (see [h264-test.md](../h264-test.md)).
-   `dmesg | grep -i coda` must show `Firmware version: 3.0.1`. Build
-   `cam2h264` on the board as in [tools/README.md](../tools/README.md),
-   then:
-
-       ISP=1 ./j1-h264.sh 300
+       ISP=1 j1-h264.sh 300
+       ISP=1 j1-h264.sh 300 -K
 
    Expected: 30 fps, and in the lines every 30 frames, the luminance near
-   0.18 and the ISP gains settling within a second. The CPU stays almost
-   idle (`top`). Then run `ISP=1 ./j1-h264.sh 300 -K` (no cache hints)
-   and compare the last line, `CPU per frame`. Then try
-   `ISP=1 ./j1-rtsp.sh` and play `rtsp://<board>:8554/`.
+   0.18 and the ISP gains settling within a second. Compare the last line,
+   `CPU per frame`, of the two runs: `-K` turns the cache hints off.
+
+7. The stream:
+
+       ISP=1 j1-rtsp.sh
+
+   On the PC:
+
+       ffplay -rtsp_transport tcp -fflags nobuffer rtsp://<board>:8554/
 
 ## Report
 
-- The output of steps 2, 3 and 4, with the full status lines. The line
+- The output of steps 1, 2 and 3, with the full status lines. The line
   `csc after reset` gives the matrix format, which is not known yet.
-- `bars.png` and one frame of `cam.yuv` as PNG.
-- Step 7: the `cam2h264` output with and without `-K`, and a few seconds
-  of `out.h264`.
+- `bars.png` and `cam.png`.
+- Steps 6 and 7: the `cam2h264` output with and without `-K`, and a few
+  seconds of `out.h264`.
 - On a stall or a hang: `dmesg | grep -i cv1800` and
   `cat /sys/kernel/debug/a000000.video-input/status`.
 
-To go back: reboot, or `rmmod cv1800_vi && modprobe cv1800_vi`.
-
 ## Not known yet
 
-- NV21 or NV12 as the hardware order (step 3).
+- NV21 or NV12 as the hardware order (step 4).
 - Scale, offsets and range of the RGB to YUV matrix at reset. The driver
   reports limited-range BT.601 until that is checked.
 - Whether the output DMA accepts software-set strides. The vendor lets the
@@ -133,7 +137,7 @@ frames late) settles in 8 to 20 frames: luminance 0.17 to 0.19, white
 balance within 3% of the light's ideal gains, no oscillation. Two
 assumptions come from the open questions above: limited-range YUV, and
 NV12 as the driver labels it. If the chroma order is swapped, the white
-balance loop runs to its limits; check step 3 first.
+balance loop runs to its limits; check step 4 first.
 
 ## Next steps
 
