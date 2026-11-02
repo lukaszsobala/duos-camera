@@ -37,11 +37,14 @@ one 0920 serves both patch directories.
 ## Board setup
 
 1. Install the image and dtb packages.
-2. Copy the vendor firmware to the board, as `/lib/firmware/coda980.bin`:
+2. Copy the vendor firmware to the board, as
+   `/lib/firmware/v4l-coda980-sg2000.bin`:
 
-       scp <duo-buildroot-sdk-v2>/device/generic/rootfs_overlay/common/usr/share/fw_vcodec/coda980.bin root@<board>:/lib/firmware/
+       scp <duo-buildroot-sdk-v2>/device/generic/rootfs_overlay/common/usr/share/fw_vcodec/coda980.bin root@<board>:/lib/firmware/v4l-coda980-sg2000.bin
 
-   md5 `02d773cb7b1ef926c7f1e30e5b7918f8`. It has no license file.
+   md5 `02d773cb7b1ef926c7f1e30e5b7918f8`. It has no license file. Kernels
+   from 2026-10-19 on (build commit 77df6a8f) ask only for this name.
+   Older kernels ask for `coda980.bin`.
 3. In `/boot/armbianEnv.txt`:
 
        overlays=camera-j1-gc2083 video-codec
@@ -64,7 +67,7 @@ one 0920 serves both patch directories.
    - `coda-video-encoder registered as /dev/videoN`
    - `coda-jpeg-encoder registered as /dev/videoM`, from `b000000.jpeg`
 
-   `Wrong firmware` means a `coda980.bin` other than product 0xcc28.
+   `Wrong firmware` means a firmware file other than product 0xcc28.
    Kernels before the cleanup print `Hardware product code 0x9800` and
    `Initialized CODA980, firmware product 0xcc28` instead.
 

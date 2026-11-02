@@ -1,7 +1,7 @@
 #!/bin/sh
 # Encode the GC2083 on J1 to H.264 (run on the board).
 #   [GAIN=n] j1-h264.sh [frames] [cam2h264 options]
-# Needs overlays=camera-j1-gc2083 video-codec, /lib/firmware/coda980.bin,
+# Needs overlays=camera-j1-gc2083 video-codec, /lib/firmware/v4l-coda980-sg2000.bin,
 # and cam2h264 next to this script. frames = 0 runs until Ctrl-C. The output
 # is out.h264, 960x540: see README.md to play it. cam2h264 sets the sensor
 # exposure and gain. GAIN=n sets a fixed analogue gain instead (64 = 1x).

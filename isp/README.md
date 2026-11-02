@@ -87,8 +87,12 @@ kernel. Check `uname -r` first: `7.2.15-edge-sophgo-sg200x-riscv64` or
    as in [j1-test.md](../j1-test.md).
 
 7. H.264 at 1920x1080 with auto exposure and white balance, after steps 3
-   to 5 work. Build `cam2h264` on the board as in
-   [tools/README.md](../tools/README.md), then:
+   to 5 work. This needs `overlays=camera-j1-gc2083 video-codec` and the
+   encoder firmware as `/lib/firmware/v4l-coda980-sg2000.bin`: the 7.2.15
+   kernel asks only for that name (see [h264-test.md](../h264-test.md)).
+   `dmesg | grep -i coda` must show `Firmware version: 3.0.1`. Build
+   `cam2h264` on the board as in [tools/README.md](../tools/README.md),
+   then:
 
        ISP=1 ./j1-h264.sh 300
 
