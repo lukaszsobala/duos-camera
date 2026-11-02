@@ -86,11 +86,23 @@ kernel. Check `uname -r` first: `7.2.15-edge-sophgo-sg200x-riscv64` or
 6. The raw node still works: run `tools/j1-stream.sh` from this repository
    as in [j1-test.md](../j1-test.md).
 
+7. H.264 at 1920x1080 with auto exposure and white balance, after steps 3
+   to 5 work. Build `cam2h264` on the board as in
+   [tools/README.md](../tools/README.md), then:
+
+       ISP=1 ./j1-h264.sh 300
+
+   Expected: 30 fps, and in the lines every 30 frames, the luminance near
+   0.18 and the ISP gains settling within a second. The CPU stays almost
+   idle (`top`). Then try `ISP=1 ./j1-rtsp.sh` and play
+   `rtsp://<board>:8554/`.
+
 ## Report
 
 - The output of steps 2, 3 and 4, with the full status lines. The line
   `csc after reset` gives the matrix format, which is not known yet.
 - `bars.png` and one frame of `cam.yuv` as PNG.
+- Step 7: the `cam2h264` output, and a few seconds of `out.h264`.
 - On a stall or a hang: `dmesg | grep -i cv1800` and
   `cat /sys/kernel/debug/a000000.video-input/status`.
 
@@ -106,6 +118,17 @@ To go back: reboot, or `rmmod cv1800_vi && modprobe cv1800_vi`.
   computes, so for 1920 wide frames both give the same result.
 - Sizes other than 1920x1080; the ISP size fields stop at 4096.
 
+## Auto exposure and white balance
+
+`cam2h264` does both in ISP mode, from the NV12 frames (see
+[tools/README.md](../tools/README.md)). A host simulation of the loops
+(scene under a warm light, the sensor and ISP modelled, settings applied 3
+frames late) settles in 8 to 20 frames: luminance 0.17 to 0.19, white
+balance within 3% of the light's ideal gains, no oscillation. Two
+assumptions come from the open questions above: limited-range YUV, and
+NV12 as the driver labels it. If the chroma order is swapped, the white
+balance loop runs to its limits; check step 3 first.
+
 ## Next steps
 
 1. Fix what the first test shows.
@@ -113,4 +136,3 @@ To go back: reboot, or `rmmod cv1800_vi && modprobe cv1800_vi`.
 3. Statistics (AE histogram, AWB grid) to a metadata node, and a params
    node in the v4l2-isp format (`include/uapi/linux/media/v4l2-isp.h`).
 4. A libcamera pipeline handler with exposure and white balance loops.
-5. cam2h264: capture from `cv1800-vi-yuv` as NV12 at full resolution.

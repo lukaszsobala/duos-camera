@@ -20,3 +20,4 @@ tpu/work/
 tpu/cviruntime-*.tar.gz
 /tpu/det-image
 isp/build/
+/tools/isp-loop-sim

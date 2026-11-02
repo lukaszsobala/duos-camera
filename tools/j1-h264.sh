@@ -5,6 +5,7 @@
 # and cam2h264 next to this script. frames = 0 runs until Ctrl-C. The output
 # is out.h264, 960x540: see README.md to play it. cam2h264 sets the sensor
 # exposure and gain. GAIN=n sets a fixed analogue gain instead (64 = 1x).
+# ISP=1: 1920x1080 from the hardware ISP (cv1800-vi-yuv), no CPU debayer.
 D=$(dirname "$0")
 N=${1:-300}
 [ $# -gt 0 ] && shift

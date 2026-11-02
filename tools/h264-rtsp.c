@@ -40,8 +40,11 @@
 #define MAX_AU		(2 << 20)
 /* ffmpeg takes at most 8192 bytes per interleaved packet */
 #define MAX_PAYLOAD	1400
-/* Unsent bytes at which a client skips to the next IDR picture */
-#define MAX_BEHIND	(64 << 10)
+/*
+ * Unsent bytes at which a client skips to the next IDR picture. A 1080p
+ * IDR picture alone is a few hundred KiB.
+ */
+#define MAX_BEHIND	(512 << 10)
 #define PT		96
 
 enum { C_FREE, C_RTSP, C_PLAY, C_CLOSE_AFTER };

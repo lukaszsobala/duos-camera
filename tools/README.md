@@ -109,6 +109,25 @@ Play the stream on the PC:
 The conversion uses the top 8 bits of each sample, one pixel per 2x2 Bayer
 cell, gray-world white balance, and no colour matrix.
 
+### ISP mode: 1920x1080 from the hardware ISP
+
+With a `cv1800-vi` that has the ISP path (see [../isp/README.md](../isp/README.md)),
+`ISP=1` makes the scripts use the node `cv1800-vi-yuv`:
+
+    ISP=1 ./j1-h264.sh 300               # 1920x1080 H.264 to out.h264
+    ISP=1 ./j1-rtsp.sh                   # the same over RTSP
+    ISP=1 ./j1-http.sh                   # 1920x1080 motion JPEG over HTTP
+    ISP=1 ./j1-h264.sh 30 -y a.nv12      # NV12 frames, no encoder
+
+`cam2h264` sees the NV12 format of that node and switches to ISP mode. The
+encoder reads the camera buffers directly: no conversion and no copy on the
+CPU. Every 4th frame, `cam2h264` samples every 8th pixel. Auto exposure sets
+the sensor for a mean luminance of 18%. White balance is gray world on the
+ISP's red and blue gains. `-B` sets the ISP black level (default 252, the
+GC2083's). Every 30 frames it prints the luminance, the clipped share, the
+ISP gains, the exposure and the gain. `-d` (detection) does not work in ISP
+mode.
+
 Object detection on the TPU: `-d model.cvimodel` draws boxes and labels
 into the picture, also through `j1-rtsp.sh` and `j1-http.sh`. It needs a
 build with `-DWITH_TPU` and the TPU runtime. See
@@ -171,3 +190,6 @@ skips to the next IDR picture. No authentication.
   `i2c-tools`.
 - `devmem.c` (board): reads and writes a register through `/dev/mem`. The
   H.265 tools use it.
+- `isp-loop-sim.c` (PC): simulates the ISP-mode auto exposure and white
+  balance of `cam2h264` against a modelled sensor and ISP. Build it with
+  `cc -O2 -o isp-loop-sim isp-loop-sim.c -lm`.

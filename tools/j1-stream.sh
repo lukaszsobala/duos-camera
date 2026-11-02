@@ -2,6 +2,8 @@
 # Capture raw frames from the GC2083 on J1 (run on the board).
 #   [GAIN=n] [OUT=file] j1-stream.sh [bridge test pattern 0-4] [frames]
 # GAIN is the sensor analogue_gain control: 64 = 1x (the default), 1024 = 16x.
+# ISP=1: the hardware ISP node (cv1800-vi-yuv), NV12 frames in
+# /root/cap.yuv. BLACK sets its black level (default 252, the GC2083's).
 # frames = 0 streams until Ctrl-C and writes no file unless OUT is set: use
 # it to watch the CPU load in top while the camera runs.
 # frames = setup configures the pipeline, prints VIDEO=<raw node>, and stops.
@@ -29,6 +31,12 @@ $M -V "\"cv1800-vi-bridge\":0 [fmt:$CODE/${W}x${H}]" || exit 1
 case $CODE in
 	SBGGR*) PIX=pBCC ;; SGBRG*) PIX=pGCC ;; SGRBG*) PIX=pgCC ;; *) PIX=pRCC ;;
 esac
+if [ -n "$ISP" ]; then
+	VIDEO=$($M -e cv1800-vi-yuv)
+	[ -n "$VIDEO" ] || { echo "no cv1800-vi-yuv node: this cv1800-vi has no ISP"; exit 1; }
+	PIX=NV12
+	v4l2-ctl -d "$VIDEO" -c black_level="${BLACK:-252}"
+fi
 v4l2-ctl -d "$BRIDGE" -c test_pattern="$TP"
 v4l2-ctl -d "$VIDEO" --set-fmt-video width=$W,height=$H,pixelformat=$PIX || exit 1
 echo "$SNAME $CODE ${W}x${H} -> $PIX, bridge pattern $TP"
@@ -42,7 +50,11 @@ if [ "$N" = 0 ]; then
 	echo "streaming until Ctrl-C; v4l2-ctl prints the frame rate"
 	exec v4l2-ctl -d "$VIDEO" --stream-mmap=4 ${OUT:+--stream-to="$OUT"}
 fi
-OUT=${OUT:-/root/cap.raw}
+if [ -n "$ISP" ]; then
+	OUT=${OUT:-/root/cap.yuv}
+else
+	OUT=${OUT:-/root/cap.raw}
+fi
 
 timeout 20 v4l2-ctl -d "$VIDEO" --stream-mmap=4 --stream-skip=3 \
 	--stream-count="$N" --stream-to="$OUT" --verbose &

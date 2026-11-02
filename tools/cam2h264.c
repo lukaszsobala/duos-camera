@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * cam2h264: GC2083 raw frames -> half-size NV12 -> CODA980 H.264, or
- * -> WAVE420L H.265 with -x, or -> JPU motion JPEG with -j.
+ * -> WAVE420L H.265 with -x, or -> JPU motion JPEG with -j. From the ISP
+ * node, full-size NV12 frames go to the encoder as they are.
  *
- *   cam2h264 -c /dev/videoN [options]   from the camera (cv1800-vi-raw)
+ *   cam2h264 -c /dev/videoN [options]   from the camera (cv1800-vi-raw,
+ *                                       or cv1800-vi-yuv: ISP mode)
  *   cam2h264 -i cap.raw [options]       from a file of raw frames
  *
  * Options:
@@ -30,6 +32,8 @@
  *   -t T     detection score threshold, 0-1 (default 0.5)
  *   -L LIST  detection class names, comma-separated (default: COCO for
  *            80-class models)
+ *   -B N     ISP mode: black level in 12-bit units (default 252, the
+ *            GC2083's)
  *
  * The input is packed RAW12, RGGB, 1920x1080, 10-bit data in the top bits.
  * Each 2x2 Bayer cell becomes one output pixel: 960x540. The program uses
@@ -40,6 +44,15 @@
  * then its analogue gain, for a mean green of 18% of white. Software gain
  * is added only when the sensor is at its limits. With -i or -M, the
  * software gain alone sets the exposure.
+ *
+ * ISP mode: the camera node gives NV12 (or NV21: the program asks for NV12)
+ * from the hardware ISP, at the sensor size. The encoder reads the camera
+ * buffers through DMABUF, without a copy. Every 4th frame, a sample of
+ * every 8th pixel gives the statistics: linear RGB through the inverse
+ * BT.601 limited-range matrix and the sRGB curve. Auto exposure sets the
+ * sensor for a mean luminance of 18%, with no software gain. White balance
+ * is gray world: it sets the ISP's red and blue gains for equal linear
+ * means. No detection in ISP mode.
  *
  * Detection: a second thread takes the newest frame whenever the TPU is
  * free. Each frame gets the latest boxes. With -i, each frame waits for
@@ -94,6 +107,19 @@ static int awb_done;
 #define AE_TARGET	(0.18 * (255 - BLACK))
 /* The highest software gain when the sensor is at its limits */
 #define AE_DIGITAL_MAX	8.0
+
+/* ISP mode */
+#define ISP_AE_TARGET	0.18		/* mean linear luminance */
+#define ISP_CID_BLACK_LEVEL	(V4L2_CID_USER_BASE | 0x1000)
+static float srgb_lin[256];		/* sRGB-encoded 8-bit value, linear */
+static double isp_r = 1.6, isp_b = 1.6;	/* ISP white balance gains */
+
+struct yuv_stats {
+	double r, g, b;		/* linear means of the white balance samples */
+	double lum;		/* mean linear luminance of all samples */
+	double clipped;		/* share of samples with a clipped channel */
+	int nwb;		/* white balance samples */
+};
 
 /* Auto exposure through the sensor subdev controls */
 static struct {
@@ -394,13 +420,11 @@ static double ae_measure(const uint8_t *raw, int stride, double *clipped)
 }
 
 /*
- * One step of auto exposure. The sensor applies a new exposure about two
- * frames later: call this every third frame.
+ * One step of auto exposure: ratio is the change of brightness to reach the
+ * target. digital: software gain may make up for a sensor at its limits.
  */
-static void ae_update(const uint8_t *raw, int stride)
+static void ae_step(double ratio, double clipped, int digital)
 {
-	double clipped, mean = ae_measure(raw, stride, &clipped);
-	double ratio = AE_TARGET / ((mean > 0.5 ? mean : 0.5) * expo);
 	double want, e, g, d;
 	struct v4l2_ext_control c[2] = {
 		{ .id = V4L2_CID_EXPOSURE }, { .id = V4L2_CID_ANALOGUE_GAIN },
@@ -444,10 +468,119 @@ static void ae_update(const uint8_t *raw, int stride)
 		ae.exp = (int)e;
 		ae.gain = (int)g;
 	}
-	if (d != expo) {
+	if (digital && d != expo) {
 		expo = d;
 		build_luts();
 	}
+}
+
+/*
+ * One step of auto exposure from a raw frame. The sensor applies a new
+ * exposure about two frames later: call this every third frame.
+ */
+static void ae_update(const uint8_t *raw, int stride)
+{
+	double clipped, mean = ae_measure(raw, stride, &clipped);
+
+	ae_step(AE_TARGET / ((mean > 0.5 ? mean : 0.5) * expo), clipped, 1);
+}
+
+static void build_srgb_lin(void)
+{
+	int i;
+
+	for (i = 0; i < 256; i++) {
+		double v = i / 255.0;
+
+		srgb_lin[i] = v <= 0.04045 ? v / 12.92 :
+			      pow((v + 0.055) / 1.055, 2.4);
+	}
+}
+
+static int clamp255(int v)
+{
+	return v < 0 ? 0 : v > 255 ? 255 : v;
+}
+
+/*
+ * Statistics of an NV12 frame from every step-th pixel in each direction.
+ * Samples with a clipped channel count as white for the luminance and do
+ * not count for white balance; nor do dark ones, which are mostly noise.
+ */
+static void yuv_measure(const uint8_t *f, int w, int h, int bpl, int step,
+			struct yuv_stats *st)
+{
+	const uint8_t *uvp = f + (size_t)bpl * h;
+	double sr = 0, sg = 0, sb = 0, sl = 0;
+	int x, y, n = 0, nc = 0, nwb = 0;
+
+	for (y = 0; y < h; y += step)
+		for (x = 0; x < w; x += step) {
+			const uint8_t *c = uvp + (size_t)(y / 2) * bpl + (x & ~1);
+			int yy = 298 * (f[(size_t)y * bpl + x] - 16);
+			int u = c[0] - 128, v = c[1] - 128;
+			int r = clamp255((yy + 409 * v + 128) >> 8);
+			int g = clamp255((yy - 100 * u - 208 * v + 128) >> 8);
+			int b = clamp255((yy + 516 * u + 128) >> 8);
+			double lr, lg, lb;
+
+			n++;
+			if (r >= 250 || g >= 250 || b >= 250) {
+				nc++;
+				sl += 1;
+				continue;
+			}
+			lr = srgb_lin[r];
+			lg = srgb_lin[g];
+			lb = srgb_lin[b];
+			sl += 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
+			if (lg < 0.005)
+				continue;
+			sr += lr;
+			sg += lg;
+			sb += lb;
+			nwb++;
+		}
+	st->lum = n ? sl / n : 0;
+	st->clipped = n ? (double)nc / n : 0;
+	st->nwb = nwb;
+	st->r = nwb ? sr / nwb : 0;
+	st->g = nwb ? sg / nwb : 0;
+	st->b = nwb ? sb / nwb : 0;
+}
+
+static void isp_set_wb(int fd)
+{
+	set_ctrl(fd, V4L2_CID_RED_BALANCE, (int)(isp_r * 1024 + 0.5),
+		 "ISP red gain");
+	set_ctrl(fd, V4L2_CID_BLUE_BALANCE, (int)(isp_b * 1024 + 0.5),
+		 "ISP blue gain");
+}
+
+static double clampd(double v, double lo, double hi)
+{
+	return v < lo ? lo : v > hi ? hi : v;
+}
+
+/*
+ * Gray world under the gains in use: the corrections that make the linear
+ * means equal. The first step takes them as they are, later steps half of
+ * them (in log terms).
+ */
+static void isp_awb(int fd, const struct yuv_stats *st)
+{
+	double k = awb_done ? 0.5 : 1.0, cr, cb;
+
+	if (st->nwb < 100 || st->r < 1e-4 || st->g < 1e-4 || st->b < 1e-4)
+		return;
+	cr = clampd(pow(st->g / st->r, k), 0.5, 2);
+	cb = clampd(pow(st->g / st->b, k), 0.5, 2);
+	awb_done = 1;
+	if (fabs(cr - 1) < 0.01 && fabs(cb - 1) < 0.01)
+		return;
+	isp_r = clampd(isp_r * cr, 0.25, 15.9);
+	isp_b = clampd(isp_b * cb, 0.25, 15.9);
+	isp_set_wb(fd);
 }
 
 #ifndef V4L2_MEMORY_FLAG_NON_COHERENT
@@ -515,6 +648,103 @@ static void stream(int fd, enum v4l2_buf_type type, int on)
 {
 	xioctl(fd, on ? VIDIOC_STREAMON : VIDIOC_STREAMOFF, &type,
 	       on ? "VIDIOC_STREAMON" : "VIDIOC_STREAMOFF");
+}
+
+/* Encoder input from a camera buffer, through its DMABUF */
+static void qbuf_dmabuf(int fd, int i, int dmafd, size_t len)
+{
+	struct v4l2_buffer vb = {
+		.index = i, .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
+		.memory = V4L2_MEMORY_DMABUF, .bytesused = len, .length = len,
+	};
+
+	vb.m.fd = dmafd;
+	xioctl(fd, VIDIOC_QBUF, &vb, "encoder VIDIOC_QBUF");
+}
+
+static int dqbuf_dmabuf(int fd)
+{
+	struct v4l2_buffer vb = {
+		.type = V4L2_BUF_TYPE_VIDEO_OUTPUT, .memory = V4L2_MEMORY_DMABUF,
+	};
+
+	while (ioctl(fd, VIDIOC_DQBUF, &vb) < 0) {
+		if (errno == EINTR && !stop)
+			continue;
+		return -1;
+	}
+	return vb.index;
+}
+
+/*
+ * ISP mode: camera buffer i goes to the encoder as its input buffer i, and
+ * back to the camera when the encoder is done with it. efd < 0: write the
+ * NV12 frames to ofd instead. Returns the number of frames.
+ */
+static int isp_loop(int cfd, int efd, int ofd, const struct buf *cam,
+		    const int *dmafd, const struct buf *ecap, int w, int h,
+		    int bpl, int frames, int jpeg, int hevc, int to_stdout,
+		    int step, long long *bytes, double *t_enc)
+{
+	size_t size = (size_t)bpl * h * 3 / 2, used = 0;
+	struct yuv_stats st = { 0 };
+	int n, i, k;
+	double t0;
+
+	for (n = 0; !stop && (frames == 0 || n < frames); n++) {
+		i = dqbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, NULL);
+		if (i < 0)
+			break;
+
+		/* The camera and the ISP apply new settings a few frames later */
+		if (n % 4 == 0) {
+			yuv_measure(cam[i].p, w, h, bpl, step, &st);
+			if (ae.fd >= 0)
+				ae_step(ISP_AE_TARGET /
+					(st.lum > 1e-3 ? st.lum : 1e-3),
+					st.clipped, 0);
+			isp_awb(cfd, &st);
+		}
+
+		if (efd < 0) {
+			if (write(ofd, cam[i].p, size) != (ssize_t)size)
+				die("write");
+			qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, i, 0);
+			*bytes += size;
+			continue;
+		}
+
+		t0 = now_ms();
+		qbuf_dmabuf(efd, i, dmafd[i], size);
+		k = dqbuf(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, &used);
+		if (k < 0) {
+			perror("encoder VIDIOC_DQBUF");
+			break;
+		}
+		if (write(ofd, ecap[k].p, used) != (ssize_t)used)
+			die("write");
+		if (!jpeg && to_stdout &&
+		    (hevc ? write(ofd, "\0\0\0\1\x46\x01\x50", 7) != 7 :
+			    write(ofd, "\0\0\0\1\x09\xf0", 6) != 6))
+			die("write");
+		*bytes += used;
+		qbuf(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, k, 0);
+		k = dqbuf_dmabuf(efd);
+		if (k < 0) {
+			perror("encoder input VIDIOC_DQBUF");
+			break;
+		}
+		qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, k, 0);
+		*t_enc += now_ms() - t0;
+
+		if (n % 30 == 0)
+			fprintf(stderr, "frame %d: %zu bytes, luminance %.3f, "
+				"clipped %.1f%%, ISP WB R %.2f B %.2f, exposure "
+				"%d lines, gain %.2fx\n", n, used, st.lum,
+				st.clipped * 100, isp_r, isp_b, ae.exp,
+				ae.fd >= 0 ? (double)ae.gain / ae.gain_min : 0);
+	}
+	return n;
 }
 
 #ifdef WITH_TPU
@@ -647,7 +877,9 @@ int main(int argc, char **argv)
 	int nbox = 0;
 #endif
 	char enc_dev[300] = "", sensor_path[300];
-	int manual = 0, mains_hz = 50, max_gain = 32;
+	int manual = 0, mains_hz = 50, max_gain = 32, black = 252;
+	int isp = 0, out_w = OUT_W, out_h = OUT_H, out_bpl = OUT_W;
+	int dmafd[NBUF_CAM];
 	int frames = 300, qp = 30, gop = 30, sat = 384, jpeg = 0, quality = 85;
 	int hevc = 0;
 	size_t cap_size = 0;
@@ -662,7 +894,7 @@ int main(int argc, char **argv)
 	long long bytes = 0;
 	off_t in_frames = 0;
 
-	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:S:MF:G:d:t:L:")) != -1) {
+	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:S:MF:G:d:t:L:B:")) != -1) {
 		switch (opt) {
 		case 'c': cam_dev = optarg; break;
 		case 'i': in_file = optarg; break;
@@ -684,13 +916,14 @@ int main(int argc, char **argv)
 		case 'd': model = optarg; break;
 		case 't': thresh = atof(optarg); break;
 		case 'L': names_list = optarg; break;
+		case 'B': black = atoi(optarg); break;
 		default:
 			fprintf(stderr, "usage: %s -c /dev/videoN | -i cap.raw "
 				"[-e enc] [-o out.h264] [-n frames] [-q qp] "
 				"[-g gop] [-s saturation] [-y out.nv12] "
 				"[-x] [-j] [-Q quality] [-b bytes] "
 				"[-S subdev] [-M] [-F hz] [-G gain] "
-				"[-d model] [-t thresh] [-L names]\n",
+				"[-d model] [-t thresh] [-L names] [-B black]\n",
 				argv[0]);
 			return 1;
 		}
@@ -729,7 +962,21 @@ int main(int argc, char **argv)
 		if (cfd < 0)
 			die(cam_dev);
 		xioctl(cfd, VIDIOC_G_FMT, &f, "camera VIDIOC_G_FMT");
-		if (f.fmt.pix.width != RAW_W || f.fmt.pix.height != RAW_H) {
+		if (f.fmt.pix.pixelformat == V4L2_PIX_FMT_NV12 ||
+		    f.fmt.pix.pixelformat == V4L2_PIX_FMT_NV21) {
+			/* The ISP node: full size, NV12 for the encoder */
+			isp = 1;
+			f.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
+			xioctl(cfd, VIDIOC_S_FMT, &f, "camera VIDIOC_S_FMT");
+			out_w = f.fmt.pix.width;
+			out_h = f.fmt.pix.height;
+			out_bpl = f.fmt.pix.bytesperline;
+			nv12_size = (size_t)out_bpl * out_h * 3 / 2;
+			if (model) {
+				fprintf(stderr, "-d: not in ISP mode\n");
+				return 1;
+			}
+		} else if (f.fmt.pix.width != RAW_W || f.fmt.pix.height != RAW_H) {
 			fprintf(stderr, "camera format %ux%u, need %dx%d: run "
 				"j1-stream.sh 0 setup first\n", f.fmt.pix.width,
 				f.fmt.pix.height, RAW_W, RAW_H);
@@ -769,11 +1016,13 @@ int main(int argc, char **argv)
 		struct v4l2_format f = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT };
 		struct v4l2_streamparm p = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT };
 
-		f.fmt.pix.width = OUT_W;
-		f.fmt.pix.height = OUT_H;
+		f.fmt.pix.width = out_w;
+		f.fmt.pix.height = out_h;
 		f.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
 		xioctl(efd, VIDIOC_S_FMT, &f, "encoder OUTPUT VIDIOC_S_FMT");
-		if (f.fmt.pix.bytesperline != OUT_W ||
+		if (f.fmt.pix.width != (unsigned int)out_w ||
+		    f.fmt.pix.height != (unsigned int)out_h ||
+		    f.fmt.pix.bytesperline != (unsigned int)out_bpl ||
 		    f.fmt.pix.sizeimage < nv12_size) {
 			fprintf(stderr, "encoder input %u bytes per line, %u "
 				"bytes: unexpected\n", f.fmt.pix.bytesperline,
@@ -783,8 +1032,8 @@ int main(int argc, char **argv)
 
 		memset(&f, 0, sizeof(f));
 		f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-		f.fmt.pix.width = OUT_W;
-		f.fmt.pix.height = OUT_H;
+		f.fmt.pix.width = out_w;
+		f.fmt.pix.height = out_h;
 		f.fmt.pix.pixelformat = jpeg ? V4L2_PIX_FMT_JPEG :
 				       hevc ? V4L2_PIX_FMT_HEVC :
 					      V4L2_PIX_FMT_H264;
@@ -820,7 +1069,23 @@ int main(int argc, char **argv)
 		set_ctrl(efd, V4L2_CID_MPEG_VIDEO_BITRATE, 0, "bitrate");
 	}
 	if (efd >= 0) {
-		map_bufs(efd, V4L2_BUF_TYPE_VIDEO_OUTPUT, eout, NBUF_ENC_OUT, 0);
+		if (isp) {
+			/* The camera buffers are the encoder input */
+			struct v4l2_requestbuffers rb = {
+				.count = NBUF_CAM, .type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
+				.memory = V4L2_MEMORY_DMABUF,
+			};
+
+			xioctl(efd, VIDIOC_REQBUFS, &rb, "encoder VIDIOC_REQBUFS");
+			if (rb.count < NBUF_CAM) {
+				fprintf(stderr, "encoder: only %u input buffers\n",
+					rb.count);
+				return 1;
+			}
+		} else {
+			map_bufs(efd, V4L2_BUF_TYPE_VIDEO_OUTPUT, eout,
+				 NBUF_ENC_OUT, 0);
+		}
 		map_bufs(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, ecap, NBUF_ENC_CAP, 0);
 		for (n = 0; n < NBUF_ENC_CAP; n++)
 			qbuf(efd, V4L2_BUF_TYPE_VIDEO_CAPTURE, n, 0);
@@ -861,8 +1126,23 @@ int main(int argc, char **argv)
 		cam_cached = map_bufs(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, cam,
 				      NBUF_CAM, V4L2_MEMORY_FLAG_NON_COHERENT) &
 			     V4L2_MEMORY_FLAG_NON_COHERENT;
-		fprintf(stderr, "camera buffers: %s\n",
-			cam_cached ? "cached" : "uncached, copied");
+		fprintf(stderr, "camera buffers: %s\n", cam_cached ? "cached" :
+			isp ? "uncached, sampled less" : "uncached, copied");
+		for (n = 0; isp && n < NBUF_CAM; n++) {
+			struct v4l2_exportbuffer eb = {
+				.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .index = n,
+				.flags = O_RDWR | O_CLOEXEC,
+			};
+
+			xioctl(cfd, VIDIOC_EXPBUF, &eb, "camera VIDIOC_EXPBUF");
+			dmafd[n] = eb.fd;
+		}
+		if (isp) {
+			set_ctrl(cfd, ISP_CID_BLACK_LEVEL, black, "ISP black level");
+			set_ctrl(cfd, V4L2_CID_GAMMA, 1, "ISP gamma");
+			isp_set_wb(cfd);
+			build_srgb_lin();
+		}
 		for (n = 0; n < NBUF_CAM; n++)
 			qbuf(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, n, 0);
 		stream(cfd, V4L2_BUF_TYPE_VIDEO_CAPTURE, 1);
@@ -870,8 +1150,8 @@ int main(int argc, char **argv)
 
 	signal(SIGINT, on_sigint);
 	build_luts();
-	fprintf(stderr, "%s -> %dx%d NV12 -> %s -> %s, ",
-		cam_dev ? cam_dev : in_file, OUT_W, OUT_H,
+	fprintf(stderr, "%s -> %s%dx%d NV12 -> %s -> %s, ",
+		cam_dev ? cam_dev : in_file, isp ? "ISP -> " : "", out_w, out_h,
 		yuv_file ? "no encoder" : enc_dev, out_file);
 	if (jpeg)
 		fprintf(stderr, "JPEG quality %d\n", quality);
@@ -879,7 +1159,12 @@ int main(int argc, char **argv)
 		fprintf(stderr, "QP %d, GOP %d\n", qp, gop);
 
 	t_start = now_ms();
-	for (n = 0; !stop && (frames == 0 || n < frames); n++) {
+	n = 0;
+	if (isp)
+		n = isp_loop(cfd, efd, ofd, cam, dmafd, ecap, out_w, out_h,
+			     out_bpl, frames, jpeg, hevc, to_stdout,
+			     cam_cached ? 8 : 16, &bytes, &t_enc);
+	for (; !isp && !stop && (frames == 0 || n < frames); n++) {
 		const uint8_t *src = raw;
 		size_t used;
 		int i, ci = -1;
