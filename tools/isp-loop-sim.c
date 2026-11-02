@@ -7,7 +7,7 @@
  *
  *   cc -O2 -o isp-loop-sim isp-loop-sim.c -lm
  *   ./isp-loop-sim [light, default 0.2] [delay in frames, default 3]
- *                  [lamp area in %, default 0]
+ *                  [lamp area in %, default 0] [saturation, default 1.5]
  *
  * A lamp area adds patches 20 times brighter than white paper: a backlit
  * scene.
@@ -70,11 +70,15 @@ static void render(uint8_t *f, double light, const double illum[3], int exp, int
 	for (y = 0; y < H; y++)
 		for (x = 0; x < W; x++) {
 			int rgb[3];
+			double lin[3], m[9];
+			sat_matrix(isp_sat, m);
 			for (c = 0; c < 3; c++) {
 				double s = refl[c][y / 20][x / 20] * illum[c] * light * exp * gain / 64.0 / 300.0;
 				s = s > 1 ? 1 : s;		/* sensor clips */
-				rgb[c] = srgb8(s * g[c]);	/* ISP gain, gamma */
+				lin[c] = s * g[c];		/* ISP gain */
 			}
+			for (c = 0; c < 3; c++)		/* colour matrix, gamma */
+				rgb[c] = srgb8(m[3 * c] * lin[0] + m[3 * c + 1] * lin[1] + m[3 * c + 2] * lin[2]);
 			yy[y][x] = ((66 * rgb[0] + 129 * rgb[1] + 25 * rgb[2] + 128) >> 8) + 16;
 			uu[y][x] = ((-38 * rgb[0] - 74 * rgb[1] + 112 * rgb[2] + 128) >> 8) + 128;
 			vv[y][x] = ((112 * rgb[0] - 94 * rgb[1] - 18 * rgb[2] + 128) >> 8) + 128;
@@ -98,6 +102,8 @@ int main(int argc, char **argv)
 	static int hist[8][4];
 	int DELAY = argc > 2 ? atoi(argv[2]) : 3;
 	double lamp = argc > 3 ? atof(argv[3]) / 100 : 0;
+
+	isp_sat = argc > 4 ? atof(argv[4]) : 1.5;
 
 	for (y = 0; y < H / 20; y++)
 		for (x = 0; x < W / 20; x++)

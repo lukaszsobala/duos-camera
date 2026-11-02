@@ -19,7 +19,8 @@
  *   -x       H.265 with the WAVE420L, instead of H.264
  *   -j       motion JPEG with the JPEG unit, instead of H.264
  *   -Q N     JPEG quality, 5-100 (default 85)
- *   -s F     colour saturation (default 1.5)
+ *   -s F     colour saturation (default 1.5). ISP mode: through the ISP's
+ *            colour matrix
  *   -y FILE  write NV12 frames to FILE, without the encoder
  *   -S DEV   sensor subdev for auto exposure (default: the subdev named
  *            gc2083...)
@@ -122,11 +123,15 @@ static int awb_done;
 /* ISP mode */
 #define ISP_AE_TARGET	0.18		/* mean linear luminance */
 #define ISP_CID_BLACK_LEVEL	(V4L2_CID_USER_BASE | 0x1000)
+#define ISP_CID_CCM		(V4L2_CID_USER_BASE | 0x1001)
 #define ISP_STEP	16		/* statistics from every 16th pixel */
 #define ISP_AE_HI	240		/* the brightest 2% stay below this */
 static float srgb_lin[256];		/* sRGB-encoded 8-bit value, linear */
 static double isp_r = 1.6, isp_b = 1.6;	/* ISP white balance gains */
 static int isp_full;			/* full-range YUV, else limited */
+static double isp_sat = 1;		/* saturation of the ISP colour matrix */
+/* Linear luminance weights: the colour matrix keeps this sum */
+static const double lum_w[3] = { 0.2126, 0.7152, 0.0722 };
 
 struct yuv_stats {
 	double r, g, b;		/* linear means of the white balance samples */
@@ -619,18 +624,60 @@ static double clampd(double v, double lo, double hi)
 }
 
 /*
+ * The saturation matrix, rows R G B: s on the diagonal, minus what keeps
+ * the luminance and white. Its inverse is the matrix for 1 / s.
+ */
+static void sat_matrix(double s, double m[9])
+{
+	int r, c;
+
+	for (r = 0; r < 3; r++)
+		for (c = 0; c < 3; c++)
+			m[3 * r + c] = (r == c ? s : 0) + (1 - s) * lum_w[c];
+}
+
+/* The ISP colour matrix for saturation s. Returns 0 if the driver took it. */
+static int isp_set_ccm(int fd, double s)
+{
+	double m[9];
+	int32_t v[9];
+	struct v4l2_ext_control c = {
+		.id = ISP_CID_CCM, .size = sizeof(v), .p_s32 = v,
+	};
+	struct v4l2_ext_controls cs = {
+		.which = V4L2_CTRL_WHICH_CUR_VAL, .count = 1, .controls = &c,
+	};
+	int i;
+
+	sat_matrix(s, m);
+	for (i = 0; i < 9; i++)
+		v[i] = (int32_t)lround(m[i] * 1024);
+	if (ioctl(fd, VIDIOC_S_EXT_CTRLS, &cs) < 0) {
+		fprintf(stderr, "warning: no ISP colour matrix: %s\n",
+			strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
+/*
  * Gray world under the gains in use: the corrections that make the linear
  * means equal. The first step takes them as they are, later steps half of
- * them (in log terms).
+ * them (in log terms). The means come after the colour matrix: its inverse
+ * gives them as the white balance gains see them.
  */
 static void isp_awb(int fd, const struct yuv_stats *st)
 {
-	double k = awb_done ? 0.5 : 1.0, cr, cb;
+	double k = awb_done ? 0.5 : 1.0, cr, cb, m[9], r, g, b;
 
-	if (st->nwb < 100 || st->r < 1e-4 || st->g < 1e-4 || st->b < 1e-4)
+	sat_matrix(1 / isp_sat, m);
+	r = m[0] * st->r + m[1] * st->g + m[2] * st->b;
+	g = m[3] * st->r + m[4] * st->g + m[5] * st->b;
+	b = m[6] * st->r + m[7] * st->g + m[8] * st->b;
+	if (st->nwb < 100 || r < 1e-4 || g < 1e-4 || b < 1e-4)
 		return;
-	cr = clampd(pow(st->g / st->r, k), 0.5, 2);
-	cb = clampd(pow(st->g / st->b, k), 0.5, 2);
+	cr = clampd(pow(g / r, k), 0.5, 2);
+	cb = clampd(pow(g / b, k), 0.5, 2);
 	awb_done = 1;
 	if (fabs(cr - 1) < 0.01 && fabs(cb - 1) < 0.01)
 		return;
@@ -1326,6 +1373,8 @@ int main(int argc, char **argv)
 		if (isp) {
 			set_ctrl(cfd, ISP_CID_BLACK_LEVEL, black, "ISP black level");
 			set_ctrl(cfd, V4L2_CID_GAMMA, 1, "ISP gamma");
+			if (!isp_set_ccm(cfd, sat / 256.0))
+				isp_sat = sat / 256.0;
 			isp_set_wb(cfd);
 			build_srgb_lin();
 		}

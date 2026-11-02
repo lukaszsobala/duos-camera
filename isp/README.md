@@ -29,13 +29,17 @@ stage writes 4:2:0 to the capture buffer. The vendor calls this the offline
 back end mode. The register sequence follows the vendor's GPL kernel driver,
 `<duo-buildroot-sdk-v2>/osdrv/interdrv/vi/chip/cv181x/`.
 
-Active: black level, white balance gains, demosaic, sRGB gamma, RGB to YUV
-matrix at its reset value. Off: lens shading, colour matrix, defect pixels,
-noise reduction, sharpening, tone mapping, all statistics.
+Active: black level, white balance gains, demosaic, colour matrix, sRGB
+gamma, BT.601 RGB to YUV matrix. Off: lens shading, defect pixels, noise
+reduction, sharpening, tone mapping, all statistics.
 
 Controls on `cv1800-vi-yuv`: `red_balance`, `blue_balance` (1024 = 1.0),
 `black_level` (12-bit units; GC2083: 252, from the vendor's
-`gc2083_cmos_param.h`), `gamma` (1 = sRGB, 0 = linear).
+`gc2083_cmos_param.h`), `gamma` (1 = sRGB, 0 = linear),
+`colour_correction_matrix` (3x3, rows R G B, 1024 = 1.0, default identity).
+`cam2h264` loads a saturation matrix (`-s`, default 1.5). The vendor keeps
+its GC2083 matrix in binary tuning files only, so a calibrated matrix needs
+a colour chart.
 
 ## Test
 
