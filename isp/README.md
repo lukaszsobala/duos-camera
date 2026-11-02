@@ -13,10 +13,10 @@ Not tested on the Arm core.
 - The same driver in `<linux-gc2083>`, branch `cv1800-isp` on v7.2-rc7:
   import commit, then the ISP commit. Build check there:
   `make ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- M=drivers/media/platform/sophgo CONFIG_VIDEO_SOPHGO_CV1800_VI=m KBUILD_MODPOST_WARN=1 W=1 modules`.
-- Test modules for 7.2.15 kernels without the ISP path (built from the
-  headers packages in `<armbian-build>/output/debs/`):
-  `build/cv1800-vi-7.2.15-riscv64.ko`, `build/cv1800-vi-7.2.15-arm64.ko`.
-  Not in git. Not needed with a kernel built from the `cv1800-isp` commit.
+- Test module for the riscv64 7.2.15 kernels, with or without the ISP
+  path (built from the headers package in `<armbian-build>/output/debs/`):
+  `build/cv1800-vi-7.2.15-riscv64.ko`, the driver at the newest commit of
+  the branch. Not in git. Not needed with a kernel built from that commit.
 
 ## What the driver does
 
