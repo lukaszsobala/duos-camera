@@ -136,7 +136,7 @@ the sensor for a mean luminance of 18%, but keeps the brightest 2% of the
 picture below clipping. A lamp or a window can pull the mean down to 9%, no
 further. White balance is gray world on the
 ISP's red and blue gains. `-s` sets the saturation through the ISP's colour
-matrix (default 1.5, 1 = off). `-B` sets the ISP black level (default 252,
+matrix (default 2, 1 = off). `-B` sets the ISP black level (default 252,
 the GC2083's). Every 30 frames it prints the luminance, the clipped share, the
 ISP gains, the exposure and the gain. `-d` (detection) does not work in ISP
 mode.

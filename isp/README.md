@@ -37,7 +37,8 @@ Controls on `cv1800-vi-yuv`: `red_balance`, `blue_balance` (1024 = 1.0),
 `black_level` (12-bit units; GC2083: 252, from the vendor's
 `gc2083_cmos_param.h`), `gamma` (1 = sRGB, 0 = linear),
 `colour_correction_matrix` (3x3, rows R G B, 1024 = 1.0, default identity).
-`cam2h264` loads a saturation matrix (`-s`, default 1.5). The vendor keeps
+`cam2h264` loads a saturation matrix (`-s`, default 2, chosen on the board
+2026-11-02 over 1.5). The vendor keeps
 its GC2083 matrix in binary tuning files only, so a calibrated matrix needs
 a colour chart.
 

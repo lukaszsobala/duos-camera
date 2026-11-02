@@ -20,7 +20,7 @@
  *   -j       motion JPEG with the JPEG unit, instead of H.264
  *   -Q N     JPEG quality, 5-100 (default 85)
  *   -s F     colour saturation (default 1.5). ISP mode: through the ISP's
- *            colour matrix
+ *            colour matrix (default 2)
  *   -y FILE  write NV12 frames to FILE, without the encoder
  *   -S DEV   sensor subdev for auto exposure (default: the subdev named
  *            gc2083...)
@@ -125,6 +125,7 @@ static int awb_done;
 #define ISP_CID_BLACK_LEVEL	(V4L2_CID_USER_BASE | 0x1000)
 #define ISP_CID_CCM		(V4L2_CID_USER_BASE | 0x1001)
 #define ISP_STEP	16		/* statistics from every 16th pixel */
+#define ISP_SAT		2.0		/* default saturation of the colour matrix */
 #define ISP_AE_HI	240		/* the brightest 2% stay below this */
 static float srgb_lin[256];		/* sRGB-encoded 8-bit value, linear */
 static double isp_r = 1.6, isp_b = 1.6;	/* ISP white balance gains */
@@ -1094,7 +1095,7 @@ int main(int argc, char **argv)
 	int manual = 0, mains_hz = 50, max_gain = 32, black = 252;
 	int isp = 0, out_w = OUT_W, out_h = OUT_H, out_bpl = OUT_W;
 	int dmafd[NBUF_ISP], ncam = NBUF_CAM, lost = 0;
-	int frames = 300, qp = 30, gop = 30, sat = 384, jpeg = 0, quality = 85;
+	int frames = 300, qp = 30, gop = 30, sat = -1, jpeg = 0, quality = 85;
 	int hevc = 0;
 	size_t cap_size = 0;
 	const char *enc_name;
@@ -1371,10 +1372,12 @@ int main(int argc, char **argv)
 			dmafd[n] = eb.fd;
 		}
 		if (isp) {
+			double s = sat >= 0 ? sat / 256.0 : ISP_SAT;
+
 			set_ctrl(cfd, ISP_CID_BLACK_LEVEL, black, "ISP black level");
 			set_ctrl(cfd, V4L2_CID_GAMMA, 1, "ISP gamma");
-			if (!isp_set_ccm(cfd, sat / 256.0))
-				isp_sat = sat / 256.0;
+			if (!isp_set_ccm(cfd, s))
+				isp_sat = s;
 			isp_set_wb(cfd);
 			build_srgb_lin();
 		}
@@ -1393,6 +1396,8 @@ int main(int argc, char **argv)
 	else
 		fprintf(stderr, "QP %d, GOP %d\n", qp, gop);
 
+	if (sat < 0)
+		sat = 384;		/* the raw path: 1.5 */
 	t_start = now_ms();
 	getrusage(RUSAGE_SELF, &ru0);
 	n = 0;
