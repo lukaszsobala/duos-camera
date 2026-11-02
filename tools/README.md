@@ -62,8 +62,15 @@ the kernel. See [../h265/README.md](../h265/README.md).
 
 Build it on the board:
 
-    apt install gcc libc6-dev
-    gcc -O3 -mcpu=thead-c906 -o cam2h264 cam2h264.c -lm
+    apt install gcc libc6-dev make
+    make                    # cam2h264, h264-rtsp, mjpeg-http
+    make install            # with them, the j1-*.sh scripts, to /usr/local/bin
+
+`make` adds `-mcpu=thead-c906` by itself when the compiler knows it. As
+root, `make install` needs no sudo. As another user, run `sudo make install`
+or `make install PREFIX=$HOME/.local`. `make uninstall` removes them. The
+scripts find each other in their own directory, so they must stay together.
+By hand: `gcc -O3 -mcpu=thead-c906 -o cam2h264 cam2h264.c -lm`.
 
 `-mcpu=thead-c906` (gcc 13 or later) adds the C906's T-Head extensions.
 With an older gcc, leave it out.
