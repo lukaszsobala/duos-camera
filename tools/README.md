@@ -172,7 +172,9 @@ the IMX708's non-linear gain control (1024 / (1024 - value), 1x to 16x).
 Object detection on the TPU: `-d model.cvimodel` draws boxes and labels
 into the picture, also through `j1-rtsp.sh`, `j1-http.sh` and the `j2-*.sh`
 scripts, with or without the ISP. It needs the TPU runtime and a build with
-`make TPU=1`. See [../tpu/README.md](../tpu/README.md).
+`make TPU=1`. The detector runs at most 10 times a second (`-r`), and boxes
+stay a short time after their last detection. See
+[../tpu/README.md](../tpu/README.md).
 
 ## mjpeg-http: live view in a browser
 

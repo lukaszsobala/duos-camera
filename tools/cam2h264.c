@@ -32,6 +32,9 @@
  *   -d FILE  object detection on the TPU with this YOLOv8 cvimodel: boxes
  *            and labels in the picture (build with -DWITH_TPU)
  *   -t T     detection score threshold, 0-1 (default 0.5)
+ *   -r N     detector runs per second at most, 0 = no limit (default 10).
+ *            A box stays 0.3 s, and at least 2.5 runs, after its last
+ *            detection
  *   -L LIST  detection class names, comma-separated (default: COCO for
  *            80-class models)
  *   -B N     ISP mode: black level in 12-bit units (default: GC2083 252,
@@ -950,6 +953,8 @@ static struct {
 	float thresh;
 	struct det_box box[DET_MAX];	/* the latest result */
 	int nbox;
+	int seq;		/* results so far */
+	double last;		/* when the last frame went to the detector */
 } tpu = {
 	.lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER,
 };
@@ -974,6 +979,7 @@ static void *tpu_main(void *arg)
 			memcpy(tpu.box, box, n * sizeof(box[0]));
 			tpu.nbox = n;
 		}
+		tpu.seq++;
 		tpu.busy = 0;
 		pthread_cond_broadcast(&tpu.cond);
 	}
@@ -999,26 +1005,115 @@ static void tpu_start(const char *model, const char *names_list,
 		die("pthread_create");
 }
 
+#define DET_HOLD_MS	300	/* a box stays this long after its last detection */
+static int det_rate = 10;	/* detector runs per second at most, 0: no limit */
+
+/* The boxes on screen, and when each was last detected */
+static struct {
+	struct det_box box[DET_MAX];
+	double seen[DET_MAX];
+	int n, seq;
+} held;
+
+static float box_iou(const struct det_box *a, const struct det_box *b)
+{
+	float w = fminf(a->x2, b->x2) - fmaxf(a->x1, b->x1);
+	float h = fminf(a->y2, b->y2) - fmaxf(a->y1, b->y1);
+	float i = w > 0 && h > 0 ? w * h : 0;
+	float u = (a->x2 - a->x1) * (a->y2 - a->y1) +
+		  (b->x2 - b->x1) * (b->y2 - b->y1) - i;
+
+	return u > 0 ? i / u : 0;
+}
+
 /*
- * Give the frame to the detector if it is free, then draw the latest
- * boxes. wait: wait for this frame's own boxes.
+ * A new result: each box replaces the held box of its class that it
+ * overlaps most, or joins the held boxes. Held boxes that the result
+ * misses stay until they expire: one missed run makes no flicker.
+ */
+static void hold_merge(const struct det_box *res, int n, double now)
+{
+	int i, j, best;
+	float o, bo;
+
+	for (i = 0; i < n; i++) {
+		best = -1;
+		bo = 0.3f;
+		for (j = 0; j < held.n; j++) {
+			if (held.box[j].cls != res[i].cls)
+				continue;
+			o = box_iou(&held.box[j], &res[i]);
+			if (o > bo) {
+				bo = o;
+				best = j;
+			}
+		}
+		if (best < 0 && held.n < DET_MAX)
+			best = held.n++;
+		if (best >= 0) {
+			held.box[best] = res[i];
+			held.seen[best] = now;
+		}
+	}
+}
+
+/*
+ * Drop the expired held boxes; copy the others to out. At low rates a box
+ * stays 2.5 runs: two missed runs make no flicker.
+ */
+static int hold_get(double now, struct det_box *out)
+{
+	double hold = det_rate > 0 && 2500.0 / det_rate > DET_HOLD_MS ?
+		      2500.0 / det_rate : DET_HOLD_MS;
+	int i, n = 0;
+
+	for (i = 0; i < held.n; i++) {
+		if (now - held.seen[i] > hold)
+			continue;
+		held.box[n] = held.box[i];
+		held.seen[n] = held.seen[i];
+		out[n++] = held.box[i];
+	}
+	held.n = n;
+	return n;
+}
+
+/*
+ * Give the frame to the detector if it is free and det_rate allows it,
+ * then draw the boxes. wait: wait for this frame's own boxes, and draw
+ * only those.
  */
 static int tpu_frame(uint8_t *nv12, int wait, const char *const *names,
 		     struct det_box *box)
 {
-	int n;
+	struct det_box res[DET_MAX];
+	double now = now_ms();
+	int n, seq;
 
 	pthread_mutex_lock(&tpu.lock);
-	if (!tpu.busy) {
+	if (!tpu.busy && (wait || det_rate <= 0 ||
+			  now - tpu.last >= 1000.0 / det_rate)) {
 		memcpy(tpu.nv12, nv12, (size_t)tpu.fw * tpu.fh * 3 / 2);
 		tpu.busy = 1;
+		tpu.last = now;
 		pthread_cond_broadcast(&tpu.cond);
 	}
 	while (wait && tpu.busy)
 		pthread_cond_wait(&tpu.cond, &tpu.lock);
 	n = tpu.nbox;
-	memcpy(box, tpu.box, n * sizeof(box[0]));
+	seq = tpu.seq;
+	memcpy(res, tpu.box, n * sizeof(res[0]));
 	pthread_mutex_unlock(&tpu.lock);
+
+	if (wait) {
+		memcpy(box, res, n * sizeof(box[0]));
+	} else {
+		if (seq != held.seq) {
+			hold_merge(res, n, now);
+			held.seq = seq;
+		}
+		n = hold_get(now, box);
+	}
 	det_draw_nv12(nv12, tpu.fw, tpu.fh, box, n, names);
 	return n;
 }
@@ -1250,7 +1345,7 @@ int main(int argc, char **argv)
 	long long bytes = 0;
 	off_t in_frames = 0;
 
-	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:S:MF:G:d:t:L:B:KY:")) != -1) {
+	while ((opt = getopt(argc, argv, "c:i:e:o:n:q:g:s:y:jxQ:b:S:MF:G:d:t:r:L:B:KY:")) != -1) {
 		switch (opt) {
 		case 'c': cam_dev = optarg; break;
 		case 'i': in_file = optarg; break;
@@ -1271,6 +1366,11 @@ int main(int argc, char **argv)
 		case 'G': max_gain = atoi(optarg); break;
 		case 'd': model = optarg; break;
 		case 't': thresh = atof(optarg); break;
+		case 'r':
+#ifdef WITH_TPU
+			det_rate = atoi(optarg);
+#endif
+			break;
 		case 'L': names_list = optarg; break;
 		case 'B': black = atoi(optarg); break;
 		case 'K': no_hints = 1; break;
@@ -1281,7 +1381,7 @@ int main(int argc, char **argv)
 				"[-g gop] [-s saturation] [-y out.nv12] "
 				"[-x] [-j] [-Q quality] [-b bytes] "
 				"[-S subdev] [-M] [-F hz] [-G gain] "
-				"[-d model] [-t thresh] [-L names] [-B black] [-K] [-Y nr]\n",
+				"[-d model] [-t thresh] [-r rate] [-L names] [-B black] [-K] [-Y nr]\n",
 				argv[0]);
 			return 1;
 		}

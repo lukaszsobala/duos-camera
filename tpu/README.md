@@ -152,6 +152,13 @@ On arm64, leave out `-mcpu=thead-c906`.
 
    Compare the frame rate and the detector times with step 4.
 
+The detector runs at most 10 times a second (`-r N`, 0 = no limit). A box
+stays 0.3 s, and at least 2.5 runs, after its last detection, so an object
+near the score threshold does not flicker. On the board, one run of the
+384x640 model took 19.4 ms of CPU (the input) and 19.0 ms of TPU; without
+the limit the detector ran about 15 times a second and the CPU load went
+from under 5% to about 40%.
+
 `-t 0.3` shows less certain objects too. MJPEG over HTTP works the same:
 `ISP=1 j1-http.sh -d <model>`.
 
