@@ -487,6 +487,7 @@ static const uint8_t palette[8][3] = {
 struct canvas {
 	uint8_t *p;
 	int w, h, nv12;
+	int scale;		/* line and text size: 1 up to 960 wide, 2 at 1920 */
 };
 
 static void color_yuv(const uint8_t *c, int *y, int *u, int *v)
@@ -531,7 +532,9 @@ static void fill(struct canvas *cv, int x1, int y1, int x2, int y2,
 static void text(struct canvas *cv, int x0, int y0, const char *s,
 		 const uint8_t *fg)
 {
-	for (; *s; s++, x0 += 8 * TEXT_SCALE) {
+	int ts = TEXT_SCALE * cv->scale;
+
+	for (; *s; s++, x0 += 8 * ts) {
 		const unsigned char *g;
 		int r, b;
 
@@ -541,10 +544,9 @@ static void text(struct canvas *cv, int x0, int y0, const char *s,
 		for (r = 0; r < 8; r++)
 			for (b = 0; b < 8; b++)
 				if (g[r] >> b & 1)
-					fill(cv, x0 + b * TEXT_SCALE,
-					     y0 + r * TEXT_SCALE,
-					     x0 + (b + 1) * TEXT_SCALE,
-					     y0 + (r + 1) * TEXT_SCALE, fg);
+					fill(cv, x0 + b * ts, y0 + r * ts,
+					     x0 + (b + 1) * ts,
+					     y0 + (r + 1) * ts, fg);
 	}
 }
 
@@ -561,12 +563,13 @@ static void draw(struct canvas *cv, const struct det_box *bx, int n,
 		int x2 = (int)bx[i].x2, y2 = (int)bx[i].y2;
 		int light = 66 * c[0] + 129 * c[1] + 25 * c[2] > 128 * 220;
 		char label[48];
-		int tw, th = 8 * TEXT_SCALE + 2, ty;
+		int t = THICK * cv->scale, ts = TEXT_SCALE * cv->scale;
+		int tw, th = 8 * ts + 2, ty;
 
-		fill(cv, x1, y1, x2 + 1, y1 + THICK, c);
-		fill(cv, x1, y2 + 1 - THICK, x2 + 1, y2 + 1, c);
-		fill(cv, x1, y1, x1 + THICK, y2 + 1, c);
-		fill(cv, x2 + 1 - THICK, y1, x2 + 1, y2 + 1, c);
+		fill(cv, x1, y1, x2 + 1, y1 + t, c);
+		fill(cv, x1, y2 + 1 - t, x2 + 1, y2 + 1, c);
+		fill(cv, x1, y1, x1 + t, y2 + 1, c);
+		fill(cv, x2 + 1 - t, y1, x2 + 1, y2 + 1, c);
 
 		if (names)
 			snprintf(label, sizeof(label), "%s %.0f",
@@ -574,7 +577,7 @@ static void draw(struct canvas *cv, const struct det_box *bx, int n,
 		else
 			snprintf(label, sizeof(label), "%d %.0f", bx[i].cls,
 				 bx[i].score * 100);
-		tw = (int)strlen(label) * 8 * TEXT_SCALE + 2;
+		tw = (int)strlen(label) * 8 * ts + 2;
 		/* Above the box, or inside it at the top of the picture */
 		ty = y1 >= th ? y1 - th : y1;
 		fill(cv, x1, ty, x1 + tw, ty + th, c);
@@ -585,7 +588,7 @@ static void draw(struct canvas *cv, const struct det_box *bx, int n,
 void det_draw_nv12(uint8_t *nv12, int w, int h, const struct det_box *b,
 		   int n, const char *const *names)
 {
-	struct canvas cv = { nv12, w, h, 1 };
+	struct canvas cv = { nv12, w, h, 1, w > 1440 ? 2 : 1 };
 
 	draw(&cv, b, n, names);
 }
@@ -593,7 +596,7 @@ void det_draw_nv12(uint8_t *nv12, int w, int h, const struct det_box *b,
 void det_draw_rgb(uint8_t *rgb, int w, int h, const struct det_box *b, int n,
 		  const char *const *names)
 {
-	struct canvas cv = { rgb, w, h, 0 };
+	struct canvas cv = { rgb, w, h, 0, w > 1440 ? 2 : 1 };
 
 	draw(&cv, b, n, names);
 }

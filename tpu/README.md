@@ -35,6 +35,11 @@ runtime's own samples (`cviruntime/samples/samples_extra`).
 - `cam2h264` converts each camera frame to 960x540 NV12. When the TPU is
   free, a second thread takes a copy of the frame. Each frame gets the
   latest boxes before it goes to the encoder.
+- In ISP mode (`ISP=1`, or the `j2-*.sh` scripts), the frames are 1920x1080
+  NV12 from the ISP, and the boxes go into the camera buffer, which the
+  encoder reads by DMA. `VIDIOC_PREPARE_BUF` writes the boxes out of the
+  CPU cache before the encoder reads the frame. The camera buffers get no
+  cache hints in this mode.
 - The detector scales the frame into the model input, keeps the aspect
   ratio, and fills the rest with black. 960x540 into 640x384 gives 640x360
   and 12 black rows at the top and bottom.
@@ -85,16 +90,16 @@ needs. The output is `cviruntime-riscv64.tar.gz` and
 Everything goes to `/opt/cviruntime`. The programs find the libraries
 through their RPATH: no `ldconfig`.
 
-Copy these files to one directory on the board: `tpu-det.c`, `tpu-det.h`,
-`font8x8.h`, `det-image.c`, and from `../tools/` the files of
-[../h264-test.md](../h264-test.md) step 4 and 6 (`cam2h264.c`,
-`h264-rtsp.c`, the `j1-*.sh` scripts). Build there:
+Then build `cam2h264` with detection, and install it with the scripts,
+from a clone of this repository:
+
+    make -C tools clean && make -C tools TPU=1 install
+
+`det-image` for step 2, in `tpu/`:
 
     R=/opt/cviruntime
-    TPU="-I$R/include -L$R/lib -Wl,-rpath,$R/lib -lcviruntime -lpthread -lm"
-    gcc -O3 -mcpu=thead-c906 -o det-image det-image.c tpu-det.c $TPU
-    gcc -O3 -mcpu=thead-c906 -DWITH_TPU -o cam2h264 cam2h264.c tpu-det.c $TPU
-    gcc -O2 -o h264-rtsp h264-rtsp.c
+    gcc -O3 -mcpu=thead-c906 -o det-image det-image.c tpu-det.c \
+        -I$R/include -L$R/lib -Wl,-rpath,$R/lib -lcviruntime -lpthread -lm
 
 On arm64, leave out `-mcpu=thead-c906`.
 
@@ -131,7 +136,9 @@ On arm64, leave out `-mcpu=thead-c906`.
 
 4. **Live, over RTSP.**
 
-       ./j1-rtsp.sh -d yolov8n_det_coco80_640_640_INT8_cv181x.cvimodel
+       ISP=1 j1-rtsp.sh -d yolov8n_det_coco80_640_640_INT8_cv181x.cvimodel   # 1920x1080, the ISP
+       j1-rtsp.sh -d yolov8n_det_coco80_640_640_INT8_cv181x.cvimodel         # 960x540, CPU debayer
+       j2-rtsp.sh -d yolov8n_det_coco80_640_640_INT8_cv181x.cvimodel         # camera on J2
 
    On the PC: `ffplay -rtsp_transport tcp -fflags nobuffer
    rtsp://<board>:8554/`. Expected: the picture with boxes that follow the
@@ -141,12 +148,12 @@ On arm64, leave out `-mcpu=thead-c906`.
 
 5. **The 384x640 model.**
 
-       ./j1-rtsp.sh -d yolov8n_det_hand_face_person_384_640_INT8_cv181x.cvimodel -L hand,face,person
+       ISP=1 j1-rtsp.sh -d yolov8n_det_hand_face_person_384_640_INT8_cv181x.cvimodel -L hand,face,person
 
    Compare the frame rate and the detector times with step 4.
 
 `-t 0.3` shows less certain objects too. MJPEG over HTTP works the same:
-`./j1-http.sh -d <model>`.
+`ISP=1 j1-http.sh -d <model>`.
 
 ## If a step fails
 

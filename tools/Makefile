@@ -6,6 +6,8 @@
 #   make install      copy them and the j1-*.sh and j2-*.sh scripts to
 #                     $(PREFIX)/bin
 #   make uninstall
+#   make TPU=1 ...    cam2h264 with object detection (-d), with the TPU
+#                     runtime in $(CVIRUNTIME) (see ../tpu/README.md)
 #
 # Run it on the board, not on a PC: a PC's riscv64 compiler can target a
 # newer CPU than the SG2000's C906. As root, install needs no sudo. As
@@ -25,10 +27,17 @@ PROGS   = cam2h264 h264-rtsp mjpeg-http
 SCRIPTS = j1-stream.sh j1-h264.sh j1-rtsp.sh j1-http.sh \
           j2-stream.sh j2-h264.sh j2-rtsp.sh j2-http.sh
 
+CVIRUNTIME ?= /opt/cviruntime
+ifeq ($(TPU),1)
+CAM_SRC   = ../tpu/tpu-det.c
+CAM_FLAGS = -DWITH_TPU -I../tpu -I$(CVIRUNTIME)/include
+CAM_LIBS  = -L$(CVIRUNTIME)/lib -Wl,-rpath,$(CVIRUNTIME)/lib -lcviruntime -lpthread
+endif
+
 all: $(PROGS)
 
-cam2h264: cam2h264.c
-	$(CC) $(CFLAGS) -o $@ $< -lm
+cam2h264: cam2h264.c $(CAM_SRC)
+	$(CC) $(CFLAGS) $(CAM_FLAGS) -o $@ cam2h264.c $(CAM_SRC) $(CAM_LIBS) -lm
 
 h264-rtsp: h264-rtsp.c
 	$(CC) $(CFLAGS) -o $@ $<

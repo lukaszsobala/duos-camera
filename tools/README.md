@@ -140,8 +140,8 @@ matrix (default 2, 1 = off). `-Y` sets the luma noise reduction at 20x
 gain (default 10, 0 = off): the strength follows the square root of the
 gain, and is off below 2x. `-B` sets the ISP black level (default 252,
 the GC2083's). Every 30 frames it prints the luminance, the clipped share, the
-ISP gains, the exposure and the gain. `-d` (detection) does not work in ISP
-mode.
+ISP gains, the exposure and the gain. With `-d` (detection), the boxes go
+into the 1920x1080 picture.
 
 The CPU reads only every 4th buffer, so the other buffers skip the
 kernel's cache invalidate at each frame, and no buffer gets a cache clean.
@@ -170,9 +170,9 @@ finds the sensor, takes its black level (IMX708 256, OV5647 64), and knows
 the IMX708's non-linear gain control (1024 / (1024 - value), 1x to 16x).
 
 Object detection on the TPU: `-d model.cvimodel` draws boxes and labels
-into the picture, also through `j1-rtsp.sh` and `j1-http.sh`. It needs a
-build with `-DWITH_TPU` and the TPU runtime. See
-[../tpu/README.md](../tpu/README.md).
+into the picture, also through `j1-rtsp.sh`, `j1-http.sh` and the `j2-*.sh`
+scripts, with or without the ISP. It needs the TPU runtime and a build with
+`make TPU=1`. See [../tpu/README.md](../tpu/README.md).
 
 ## mjpeg-http: live view in a browser
 

@@ -63,13 +63,13 @@
  * other buffers skip the kernel's cache invalidate, and no buffer needs a
  * cache clean: the CPU never writes them. Auto exposure sets the sensor for
  * a mean luminance of 18%, with no software gain. White balance is gray
- * world: it sets the ISP's red and blue gains for equal linear means. No
- * detection in ISP mode. -K keeps the kernel's full cache syncs, for
- * comparison.
+ * world: it sets the ISP's red and blue gains for equal linear means. -K
+ * keeps the kernel's full cache syncs, for comparison.
  *
  * Detection: a second thread takes the newest frame whenever the TPU is
  * free. Each frame gets the latest boxes. With -i, each frame waits for
- * its own boxes.
+ * its own boxes. In ISP mode, the boxes go into the camera buffer at full
+ * size, and the camera buffers get no cache hints.
  *
  * Build: cc -O2 -o cam2h264 cam2h264.c -lm
  * With detection, from this directory, with the runtime in /opt/cviruntime:
@@ -933,6 +933,157 @@ static void isp_3a(int fd, const uint8_t *f, int w, int h, int bpl,
 	isp_n_3a++;
 }
 
+#ifdef WITH_TPU
+#define DET_MAX	32
+
+/* The detector thread and what it shares with the frame loop */
+static struct {
+	struct det *d;
+	pthread_t thread;
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	uint8_t *nv12;		/* the frame for the detector */
+	int fw, fh;		/* its size: NV12, stride = width */
+	const char *const *names;	/* class names */
+	int busy;		/* nv12 is waiting or in work */
+	int quit;
+	float thresh;
+	struct det_box box[DET_MAX];	/* the latest result */
+	int nbox;
+} tpu = {
+	.lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER,
+};
+
+static void *tpu_main(void *arg)
+{
+	struct det_box box[DET_MAX];
+	int n;
+
+	(void)arg;
+	pthread_mutex_lock(&tpu.lock);
+	for (;;) {
+		while (!tpu.busy && !tpu.quit)
+			pthread_cond_wait(&tpu.cond, &tpu.lock);
+		if (tpu.quit)
+			break;
+		pthread_mutex_unlock(&tpu.lock);
+		det_load_nv12(tpu.d, tpu.nv12);
+		n = det_run(tpu.d, tpu.thresh, 0.5f, box, DET_MAX);
+		pthread_mutex_lock(&tpu.lock);
+		if (n >= 0) {
+			memcpy(tpu.box, box, n * sizeof(box[0]));
+			tpu.nbox = n;
+		}
+		tpu.busy = 0;
+		pthread_cond_broadcast(&tpu.cond);
+	}
+	pthread_mutex_unlock(&tpu.lock);
+	return NULL;
+}
+
+static void tpu_start(const char *model, const char *names_list,
+		      float thresh, const char *const **names, int w, int h)
+{
+	tpu.d = det_open(model);
+	if (!tpu.d)
+		exit(1);
+	*names = tpu.names = det_names(tpu.d, names_list);
+	tpu.fw = w;
+	tpu.fh = h;
+	det_set_frame(tpu.d, w, h);
+	tpu.thresh = thresh;
+	tpu.nv12 = malloc((size_t)w * h * 3 / 2);
+	if (!tpu.nv12)
+		die("malloc");
+	if (pthread_create(&tpu.thread, NULL, tpu_main, NULL))
+		die("pthread_create");
+}
+
+/*
+ * Give the frame to the detector if it is free, then draw the latest
+ * boxes. wait: wait for this frame's own boxes.
+ */
+static int tpu_frame(uint8_t *nv12, int wait, const char *const *names,
+		     struct det_box *box)
+{
+	int n;
+
+	pthread_mutex_lock(&tpu.lock);
+	if (!tpu.busy) {
+		memcpy(tpu.nv12, nv12, (size_t)tpu.fw * tpu.fh * 3 / 2);
+		tpu.busy = 1;
+		pthread_cond_broadcast(&tpu.cond);
+	}
+	while (wait && tpu.busy)
+		pthread_cond_wait(&tpu.cond, &tpu.lock);
+	n = tpu.nbox;
+	memcpy(box, tpu.box, n * sizeof(box[0]));
+	pthread_mutex_unlock(&tpu.lock);
+	det_draw_nv12(nv12, tpu.fw, tpu.fh, box, n, names);
+	return n;
+}
+
+static void tpu_stop(void)
+{
+	const struct det_stats *st;
+
+	pthread_mutex_lock(&tpu.lock);
+	tpu.quit = 1;
+	pthread_cond_broadcast(&tpu.cond);
+	pthread_mutex_unlock(&tpu.lock);
+	pthread_join(tpu.thread, NULL);
+	st = det_stats(tpu.d);
+	if (st->runs)
+		fprintf(stderr, "detector: %d runs. Per run: input %.1f ms, "
+			"TPU %.1f ms, decode %.1f ms\n", st->runs,
+			st->load_ms / st->runs, st->tpu_ms / st->runs,
+			st->post_ms / st->runs);
+	det_close(tpu.d);
+}
+
+static void print_boxes(const struct det_box *b, int n,
+			const char *const *names)
+{
+	int i;
+
+	fprintf(stderr, "  %d objects:", n);
+	for (i = 0; i < n; i++)
+		fprintf(stderr, " %s %.0f%% (%.0f,%.0f %.0fx%.0f)",
+			names ? names[b[i].cls] : "?", b[i].score * 100,
+			b[i].x1, b[i].y1, b[i].x2 - b[i].x1, b[i].y2 - b[i].y1);
+	fprintf(stderr, "\n");
+}
+#endif
+
+/*
+ * ISP mode with detection: the boxes go into the camera buffer, which the
+ * encoder reads from memory. VIDIOC_PREPARE_BUF writes them out of the CPU
+ * cache; the camera's own QBUF then skips this step. The buffers get no
+ * cache hints in this mode: each one is written, so each one needs both
+ * syncs.
+ */
+static void isp_detect(int cfd, int i, uint8_t *frame, int n)
+{
+#ifdef WITH_TPU
+	struct det_box box[DET_MAX];
+	struct v4l2_buffer vb = {
+		.index = i, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+		.memory = V4L2_MEMORY_MMAP,
+	};
+	int nbox;
+
+	if (!tpu.d)
+		return;
+	nbox = tpu_frame(frame, 0, tpu.names, box);
+	if (nbox > 0)
+		xioctl(cfd, VIDIOC_PREPARE_BUF, &vb, "VIDIOC_PREPARE_BUF");
+	if (n % 30 == 0)
+		print_boxes(box, nbox, tpu.names);
+#else
+	(void)cfd; (void)i; (void)frame; (void)n;
+#endif
+}
+
 /* ISP mode: statistics from every 4th camera buffer, so every 4th frame */
 #define ISP_MEAS(i)	((i) % 4 == 0)
 
@@ -982,6 +1133,7 @@ static int isp_loop(int cfd, int efd, int ofd, const struct buf *cam,
 			if (n > 0)
 				*lost += dq_seq - seq;
 			seq = dq_seq + 1;
+			isp_detect(cfd, i, cam[i].p, n);
 			qbuf_dmabuf(efd, i, dmafd[i], size, dq_tv);
 			n++;
 			/*
@@ -1054,6 +1206,7 @@ static int isp_loop_file(int cfd, int ofd, const struct buf *cam, int w,
 			break;
 		if (ISP_MEAS(i) && !(dq_flags & V4L2_BUF_FLAG_ERROR))
 			isp_3a(cfd, cam[i].p, w, h, bpl, &st);
+		isp_detect(cfd, i, cam[i].p, n);
 		if (write(ofd, cam[i].p, size) != (ssize_t)size)
 			die("write");
 		/* The CPU reads every buffer here */
@@ -1066,123 +1219,6 @@ static int isp_loop_file(int cfd, int ofd, const struct buf *cam, int w,
 	return n;
 }
 
-#ifdef WITH_TPU
-#define DET_MAX	32
-
-/* The detector thread and what it shares with the frame loop */
-static struct {
-	struct det *d;
-	pthread_t thread;
-	pthread_mutex_t lock;
-	pthread_cond_t cond;
-	uint8_t *nv12;		/* the frame for the detector */
-	int busy;		/* nv12 is waiting or in work */
-	int quit;
-	float thresh;
-	struct det_box box[DET_MAX];	/* the latest result */
-	int nbox;
-} tpu = {
-	.lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER,
-};
-
-static void *tpu_main(void *arg)
-{
-	struct det_box box[DET_MAX];
-	int n;
-
-	(void)arg;
-	pthread_mutex_lock(&tpu.lock);
-	for (;;) {
-		while (!tpu.busy && !tpu.quit)
-			pthread_cond_wait(&tpu.cond, &tpu.lock);
-		if (tpu.quit)
-			break;
-		pthread_mutex_unlock(&tpu.lock);
-		det_load_nv12(tpu.d, tpu.nv12);
-		n = det_run(tpu.d, tpu.thresh, 0.5f, box, DET_MAX);
-		pthread_mutex_lock(&tpu.lock);
-		if (n >= 0) {
-			memcpy(tpu.box, box, n * sizeof(box[0]));
-			tpu.nbox = n;
-		}
-		tpu.busy = 0;
-		pthread_cond_broadcast(&tpu.cond);
-	}
-	pthread_mutex_unlock(&tpu.lock);
-	return NULL;
-}
-
-static void tpu_start(const char *model, const char *names_list,
-		      float thresh, const char *const **names)
-{
-	tpu.d = det_open(model);
-	if (!tpu.d)
-		exit(1);
-	*names = det_names(tpu.d, names_list);
-	det_set_frame(tpu.d, OUT_W, OUT_H);
-	tpu.thresh = thresh;
-	tpu.nv12 = malloc(OUT_W * OUT_H * 3 / 2);
-	if (!tpu.nv12)
-		die("malloc");
-	if (pthread_create(&tpu.thread, NULL, tpu_main, NULL))
-		die("pthread_create");
-}
-
-/*
- * Give the frame to the detector if it is free, then draw the latest
- * boxes. wait: wait for this frame's own boxes.
- */
-static int tpu_frame(uint8_t *nv12, int wait, const char *const *names,
-		     struct det_box *box)
-{
-	int n;
-
-	pthread_mutex_lock(&tpu.lock);
-	if (!tpu.busy) {
-		memcpy(tpu.nv12, nv12, OUT_W * OUT_H * 3 / 2);
-		tpu.busy = 1;
-		pthread_cond_broadcast(&tpu.cond);
-	}
-	while (wait && tpu.busy)
-		pthread_cond_wait(&tpu.cond, &tpu.lock);
-	n = tpu.nbox;
-	memcpy(box, tpu.box, n * sizeof(box[0]));
-	pthread_mutex_unlock(&tpu.lock);
-	det_draw_nv12(nv12, OUT_W, OUT_H, box, n, names);
-	return n;
-}
-
-static void tpu_stop(void)
-{
-	const struct det_stats *st;
-
-	pthread_mutex_lock(&tpu.lock);
-	tpu.quit = 1;
-	pthread_cond_broadcast(&tpu.cond);
-	pthread_mutex_unlock(&tpu.lock);
-	pthread_join(tpu.thread, NULL);
-	st = det_stats(tpu.d);
-	if (st->runs)
-		fprintf(stderr, "detector: %d runs. Per run: input %.1f ms, "
-			"TPU %.1f ms, decode %.1f ms\n", st->runs,
-			st->load_ms / st->runs, st->tpu_ms / st->runs,
-			st->post_ms / st->runs);
-	det_close(tpu.d);
-}
-
-static void print_boxes(const struct det_box *b, int n,
-			const char *const *names)
-{
-	int i;
-
-	fprintf(stderr, "  %d objects:", n);
-	for (i = 0; i < n; i++)
-		fprintf(stderr, " %s %.0f%% (%.0f,%.0f %.0fx%.0f)",
-			names ? names[b[i].cls] : "?", b[i].score * 100,
-			b[i].x1, b[i].y1, b[i].x2 - b[i].x1, b[i].y2 - b[i].y1);
-	fprintf(stderr, "\n");
-}
-#endif
 
 int main(int argc, char **argv)
 {
@@ -1309,8 +1345,9 @@ int main(int argc, char **argv)
 			out_h = f.fmt.pix.height;
 			out_bpl = f.fmt.pix.bytesperline;
 			nv12_size = (size_t)out_bpl * out_h * 3 / 2;
-			if (model) {
-				fprintf(stderr, "-d: not in ISP mode\n");
+			if (model && out_bpl != out_w) {
+				fprintf(stderr, "-d: needs lines without padding, "
+					"%d bytes for %d pixels\n", out_bpl, out_w);
 				return 1;
 			}
 		} else if (f.fmt.pix.width != RAW_W || f.fmt.pix.height != RAW_H) {
@@ -1461,7 +1498,8 @@ int main(int argc, char **argv)
 #ifdef WITH_TPU
 	/* Load the model before the camera starts */
 	if (model)
-		tpu_start(model, names_list, thresh, &names);
+		tpu_start(model, names_list, thresh, &names,
+			  isp ? out_w : OUT_W, isp ? out_h : OUT_H);
 #endif
 
 	if (cfd >= 0) {
@@ -1475,8 +1513,8 @@ int main(int argc, char **argv)
 			     V4L2_MEMORY_FLAG_NON_COHERENT;
 		fprintf(stderr, "camera buffers: %s\n",
 			!cam_cached ? (isp ? "uncached" : "uncached, copied") :
-			!isp ? "cached" : no_hints ? "cached, full cache syncs" :
-			"cached, cache hints");
+			!isp ? "cached" : no_hints || model ?
+			"cached, full cache syncs" : "cached, cache hints");
 		for (n = 0; isp && n < ncam; n++) {
 			struct v4l2_exportbuffer eb = {
 				.type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .index = n,
@@ -1520,10 +1558,11 @@ int main(int argc, char **argv)
 	if (isp && efd >= 0)
 		n = isp_loop(cfd, efd, ofd, cam, dmafd, ecap, out_w, out_h,
 			     out_bpl, frames, jpeg, hevc, to_stdout,
-			     cam_cached && !no_hints, &bytes, &t_enc, &lost);
+			     cam_cached && !no_hints && !model, &bytes, &t_enc,
+			     &lost);
 	else if (isp)
 		n = isp_loop_file(cfd, ofd, cam, out_w, out_h, out_bpl, frames,
-				  cam_cached && !no_hints, &bytes);
+				  cam_cached && !no_hints && !model, &bytes);
 	for (; !isp && !stop && (frames == 0 || n < frames); n++) {
 		const uint8_t *src = raw;
 		size_t used;
